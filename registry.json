@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "cpa-zed-provider",
+      "name": "CPA Zed Provider",
+      "description": "Adds Zed Cloud models to CLIProxyAPI.",
+      "author": "yayuk-labs",
+      "version": "0.1.0",
+      "repository": "https://github.com/yayuk-labs/cpa-zed-provider",
+      "homepage": "https://github.com/yayuk-labs/cpa-zed-provider",
+      "license": "MIT",
+      "tags": ["zed", "provider"]
+    }
+  ]
+}

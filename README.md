@@ -27,7 +27,15 @@ go build -tags cshared -buildmode=c-shared -o dist/cpa-zed-provider.dll ./cmd/cp
 
 ## Install
 
-Copy the compiled library into CPA's `plugins/` directory. The generated `.h` file is for C callers and is not needed by CPA. Use a CPA build with plugin support and enable the plugin:
+To install from CPA's Plugin Store, add this registry under `plugins.store-sources`, then choose **CPA Zed Provider** in the store:
+
+```yaml
+plugins:
+  store-sources:
+    - "https://raw.githubusercontent.com/yayuk-labs/cpa-zed-provider/main/registry.json"
+```
+
+Tagged releases publish Linux amd64 and arm64 packages. For manual installation, copy the compiled library into CPA's `plugins/` directory. The generated `.h` file is for C callers and is not needed by CPA. Use a CPA build with plugin support and enable the plugin:
 
 ```yaml
 plugins:
