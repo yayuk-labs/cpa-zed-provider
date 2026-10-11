@@ -44,5 +44,3 @@ require (
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect
 )
-
-replace github.com/router-for-me/CLIProxyAPI/v8 => ../CLIProxyAPI

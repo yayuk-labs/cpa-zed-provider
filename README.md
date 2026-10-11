@@ -1,18 +1,12 @@
 # CPA Zed Provider
 
-Zed Cloud AI provider for CLIProxyAPI, packaged as a standard C-ABI shared-library plugin like `cpa-plugin-key-billing`. The implementation follows `routr`'s `dev/zed-provider` branch and reuses CPA's public translator SDK.
+Zed Cloud AI provider for CLIProxyAPI, packaged as a standard C-ABI shared-library plugin using CPA's public translator SDK.
 
 Includes browser login, credential-file import, account-preserving sign-in, cached LLM tokens, token refresh, organization-scoped token compatibility, dynamic models, completions, and incremental streaming. Anthropic, OpenAI Responses, Google Gemini, and xAI requests use their native formats. CPA handles downstream Chat Completions, Claude Messages, and Responses compatibility and publishes usage to other plugins.
 
 ## Build
 
-Requires Go 1.26+, CGO, and a native C compiler. Keep the matching CPA checkout next to this directory: `go.mod` intentionally replaces the CPA SDK dependency with `../CLIProxyAPI`. CPA source changes are not required.
-
-```text
-router/
-  CLIProxyAPI/
-  cpa-zed-provider/
-```
+Requires Go 1.26+, CGO, and a native C compiler. The CPA SDK is resolved from its Go module. CPA source changes are not required.
 
 From `cpa-zed-provider`, build for your native platform:
 
@@ -47,7 +41,7 @@ plugins:
       # system_id: "your-own-zed-installation-id"
 ```
 
-Restart CPA. `zed_version` defaults to the version used by the routr reference; set it to your installed Zed version if Cloud requires a newer client. `login_port: 0` selects an available loopback port. Set a fixed port when using SSH forwarding. `system_id` is optional and omitted by default; use your own installation ID if needed. An auth file's `system_id` overrides the plugin setting.
+Restart CPA. `zed_version` defaults to `0.222.4`; set it to your installed Zed version if Cloud requires a newer client. `login_port: 0` selects an available loopback port. Set a fixed port when using SSH forwarding. `system_id` is optional and omitted by default; use your own installation ID if needed. An auth file's `system_id` overrides the plugin setting.
 
 ## Sign in
 
@@ -71,7 +65,7 @@ Signing in again preserves the matching account's filename, routing prefix, disa
 
 ## Import credentials
 
-Existing routr Zed auth files are accepted directly:
+Existing Zed auth files are accepted directly:
 
 ```json
 {
@@ -116,14 +110,13 @@ gofmt -l .
 The integration smoke check requires Python 3, OpenSSL, the compiled plugin, and a CPA executable. It starts isolated servers with dummy credentials, verifies plugin loading, model registration, completions, streaming, downstream protocol translation, encrypted login, and account preservation, then stops them:
 
 ```sh
-python3 scripts/smoke.py --cpa ../CLIProxyAPI/cli-proxy-api --plugin dist/cpa-zed-provider.dylib
+python3 scripts/smoke.py --cpa /path/to/cli-proxy-api --plugin dist/cpa-zed-provider.dylib
 ```
 
 Verification uses a local fake Zed server. Access with a real Zed account must be checked against that account's Cloud permissions and installed client version. Only macOS ARM64 has been built and tested in this workspace.
 
 ## Sources
 
-- [routr Zed implementation](https://github.com/yayuk-labs/routr/tree/dev/zed-provider). Plugin metadata currently points to this source repository.
 - [CPA plugin examples](https://github.com/router-for-me/CLIProxyAPI/tree/main/examples/plugin).
 - [Zed Cloud request and model types](https://github.com/zed-industries/zed/blob/main/crates/cloud_llm_client/src/cloud_llm_client.rs) and [organization/token types](https://github.com/zed-industries/zed/blob/main/crates/cloud_api_types/src/cloud_api_types.rs).
-- The C-ABI bridge is adapted from `cpa-plugin-key-billing`; its MIT notice is retained in [LICENSE](LICENSE).
+- The C-ABI bridge's MIT notice is retained in [LICENSE](LICENSE).
