@@ -69,7 +69,7 @@ func (a *App) startLogin(req request) (pluginapi.AuthLoginStartResponse, error) 
 	go func() { defer a.workers.Done(); session.server.Serve(listener) }()
 	port := listener.Addr().(*net.TCPAddr).Port
 	query := url.Values{"native_app_port": {strconv.Itoa(port)}, "native_app_public_key": {base64.RawURLEncoding.EncodeToString(x509.MarshalPKCS1PublicKey(&key.PublicKey))}}
-	return pluginapi.AuthLoginStartResponse{Provider: "zed", URL: "https://zed.dev/native_app_signin?" + query.Encode(), State: state, ExpiresAt: session.expires}, nil
+	return pluginapi.AuthLoginStartResponse{Provider: "zed", URL: "https://zed.dev/native_app_signin?" + query.Encode(), State: state, ExpiresAt: session.expires, Metadata: map[string]any{"loopback_callback_url": "http://127.0.0.1:" + strconv.Itoa(port) + "/"}}, nil
 }
 
 func (s *loginSession) callback(w http.ResponseWriter, r *http.Request) {

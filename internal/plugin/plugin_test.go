@@ -76,6 +76,9 @@ func TestBrowserLoginDecryptsCallbackAndRefreshesCredential(t *testing.T) {
 			if link.Host != "zed.dev" || link.Path != "/native_app_signin" || login.State == "" || time.Until(login.ExpiresAt) > 10*time.Minute {
 				t.Fatalf("invalid login response: %+v", login)
 			}
+			if login.Metadata["loopback_callback_url"] != "http://127.0.0.1:"+link.Query().Get("native_app_port")+"/" {
+				t.Fatal("login did not register its loopback callback URL")
+			}
 			der, err := base64.RawURLEncoding.DecodeString(link.Query().Get("native_app_public_key"))
 			if err != nil {
 				t.Fatal(err)
@@ -606,7 +609,7 @@ func TestRegistrationProvidesRequiredCPAMetadata(t *testing.T) {
 		Capabilities json.RawMessage
 	}
 	rpc(t, app, "plugin.register", map[string]any{}, &result)
-	if result.Metadata.Name == "" || result.Metadata.Version == "" || result.Metadata.Author == "" || result.Metadata.GitHubRepository == "" {
+	if result.Metadata.Name != "Zed" || result.Metadata.Logo != "https://zed.dev/favicon_black_64.png" || result.Metadata.Version == "" || result.Metadata.Author == "" || result.Metadata.GitHubRepository == "" {
 		t.Fatal("CPA rejects plugins with missing required metadata")
 	}
 }

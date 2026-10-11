@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Exercise the compiled plugin through an unchanged CPA server and fake Zed Cloud."""
+"""Exercise the compiled plugin through a CPA server and fake Zed Cloud."""
 import argparse
 import base64
-import http.client
 import json
 import shutil
 import socket
@@ -117,6 +116,9 @@ plugins:
                         time.sleep(0.1)
                     plugins = json.loads(call("/v8/management/plugins", key="smoke-management"))
                     assert "cpa-zed-provider" in json.dumps(plugins), plugins
+                    zed = next(item for item in plugins["plugins"] if item["id"] == "cpa-zed-provider")
+                    assert zed["metadata"]["name"] == "Zed", zed
+                    assert zed["logo"] == "https://zed.dev/favicon_black_64.png", zed
                     request = {"model": "zed/anthropic/claude-sonnet-4-5", "messages": [{"role": "user", "content": "Hello"}]}
                     response = json.loads(call("/v1/chat/completions", request))
                     assert response["choices"][0]["message"]["content"] == "Hello", response
@@ -135,12 +137,15 @@ plugins:
                     public_key = root / "login-public.der"
                     public_key.write_bytes(base64.urlsafe_b64decode(query["native_app_public_key"][0] + "=="))
                     encrypted = subprocess.run(["openssl", "pkeyutl", "-encrypt", "-pubin", "-keyform", "DER", "-inkey", str(public_key), "-pkeyopt", "rsa_padding_mode:oaep", "-pkeyopt", "rsa_oaep_md:sha256", "-pkeyopt", "rsa_mgf1_md:sha256"], input=b"dummy-credential", capture_output=True, check=True).stdout
-                    callback = http.client.HTTPConnection("127.0.0.1", int(query["native_app_port"][0]), timeout=5)
-                    callback.request("GET", "/?" + urllib.parse.urlencode({"user_id": "42", "access_token": base64.urlsafe_b64encode(encrypted).decode()}))
-                    redirect = callback.getresponse()
-                    assert redirect.status == 307, redirect.status
-                    redirect.read()
-                    callback.close()
+                    callback_url = "http://127.0.0.1:" + query["native_app_port"][0] + "/?" + urllib.parse.urlencode({"user_id": "42", "access_token": base64.urlsafe_b64encode(encrypted).decode()})
+                    callback = {"provider": "zed", "redirect_url": callback_url}
+                    submitted = json.loads(call("/v8/management/oauth/callback", callback, key="smoke-management"))
+                    assert submitted["status"] == "ok", submitted
+                    try:
+                        call("/v8/management/oauth/callback", callback, key="smoke-management")
+                        raise AssertionError("callback replay was accepted")
+                    except urllib.error.HTTPError as error:
+                        assert error.code == 400, error.code
                     poll = json.loads(call("/v8/management/oauth/status?state=" + login["state"], key="smoke-management"))
                     assert poll["status"] == "ok", poll
                     assert json.loads(auth.read_text())["note"] == "preserve this"

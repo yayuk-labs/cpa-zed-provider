@@ -11,3 +11,7 @@ Zed accounts supply access to AI models through Zed Cloud within CLIProxyAPI.
 **Upstream provider**: The service behind a Zed model: Anthropic, OpenAI, Google, or xAI.
 
 **Zed model**: An AI model available to a Zed account. Its upstream provider can be identified by its name or provider prefix.
+
+**Native login callback**: The loopback URL returned by Zed sign-in, containing a user ID and encrypted Zed credential.
+
+**Login session**: A pending sign-in attempt with a unique state, callback address, and expiry.

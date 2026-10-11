@@ -6,7 +6,7 @@ Includes browser login, credential-file import, account-preserving sign-in, cach
 
 ## Build
 
-Requires Go 1.26+, CGO, and a native C compiler. The CPA SDK is resolved from its Go module. CPA source changes are not required.
+Requires Go 1.26+, CGO, and a native C compiler. The CPA SDK is resolved from its Go module. Local login works with the public CPA SDK. Pasting remote callbacks requires a CPA build with plugin loopback callback forwarding support.
 
 From `cpa-zed-provider`, build for your native platform:
 
@@ -27,7 +27,7 @@ go build -tags cshared -buildmode=c-shared -o dist/cpa-zed-provider.dll ./cmd/cp
 
 ## Install
 
-To install from CPA's Plugin Store, add this registry under `plugins.store-sources`, then choose **CPA Zed Provider** in the store:
+To install from CPA's Plugin Store, add this registry under `plugins.store-sources`, then choose **Zed** in the store:
 
 ```yaml
 plugins:
@@ -60,7 +60,16 @@ curl 'http://127.0.0.1:8317/v8/management/oauth/auth-url?provider=zed' \
   -H 'Authorization: Bearer MANAGEMENT_KEY'
 ```
 
-Open the returned `url` in a browser on the CPA machine. Zed redirects to the plugin's loopback listener with an encrypted credential. For remote CPA, forward the configured `login_port` to the same local port before opening the URL. RSA private keys stay in memory; sessions expire after ten minutes.
+Open the returned `url` in a browser. Zed redirects to the plugin's loopback listener with an encrypted credential. On remote CPA, paste the full redirected URL into the management UI's callback field. This requires CPA's plugin loopback callback forwarding support; the host matches the URL to a pending login and the plugin validates the encrypted credential. Zed does not include OAuth `state` or `code` in its native callback. With older CPA builds, forward the configured `login_port` to the same local port before opening the login URL. RSA private keys stay in memory; sessions expire after ten minutes.
+
+To submit the URL through management directly:
+
+```sh
+curl -X POST 'http://127.0.0.1:8317/v8/management/oauth/callback' \
+  -H 'Authorization: Bearer MANAGEMENT_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"zed","redirect_url":"FULL_ZED_CALLBACK_URL"}'
+```
 
 Poll the returned `state` until CPA reports `ok`. This final poll persists the credential through CPA's auth store:
 
