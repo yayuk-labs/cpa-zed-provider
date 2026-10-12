@@ -7,7 +7,7 @@
       "logo": "https://zed.dev/favicon_black_64.png",
       "description": "Adds Zed Cloud models to CLIProxyAPI.",
       "author": "yayuk-labs",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "repository": "https://github.com/yayuk-labs/cpa-zed-provider",
       "homepage": "https://github.com/yayuk-labs/cpa-zed-provider",
       "license": "MIT",

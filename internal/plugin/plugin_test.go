@@ -640,6 +640,40 @@ func TestZedRequestCompatibility(t *testing.T) {
 	}
 }
 
+func TestOpenAIModelProbeRespectsResponsesMinimum(t *testing.T) {
+	for _, tc := range []struct{ limit, want int }{{1, 16}, {15, 16}, {16, 16}, {123, 123}} {
+		t.Run(fmt.Sprint(tc.limit), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/client/llm_tokens" {
+					io.WriteString(w, `{"token":"dummy-token"}`)
+					return
+				}
+				var envelope struct {
+					Request struct {
+						Limit int `json:"max_output_tokens"`
+					} `json:"provider_request"`
+				}
+				json.NewDecoder(r.Body).Decode(&envelope)
+				if envelope.Request.Limit != tc.want {
+					t.Errorf("Responses rejects a %d-token probe; got %d, want %d", tc.limit, envelope.Request.Limit, tc.want)
+					io.WriteString(w, `{"status":{"failed":{"code":"invalid_request_error","message":"max_output_tokens must be at least 16"}}}`)
+					return
+				}
+				io.WriteString(w, `{"event":{"type":"response.incomplete","response":{"id":"resp_probe","model":"gpt-6-luna","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":4,"output_tokens":16,"total_tokens":20}}}}`+"\n"+`{"status":"stream_ended"}`)
+			}))
+			defer server.Close()
+			app := testApp(t, server.URL)
+			req := completionRequest("zed/gpt-6-luna")
+			req["Payload"] = []byte(fmt.Sprintf(`{"messages":[{"role":"system","content":"You are Claude Code, Anthropic's official CLI for Claude."},{"role":"user","content":"Hi"}],"max_tokens":%d}`, tc.limit))
+			var response pluginapi.ExecutorResponse
+			rpc(t, app, "executor.execute", req, &response)
+			if !json.Valid(response.Payload) {
+				t.Fatalf("invalid probe response: %s", response.Payload)
+			}
+		})
+	}
+}
+
 func TestOtherUpstreamProviders(t *testing.T) {
 	for _, tc := range []struct{ model, provider, response string }{
 		{"zed/open_ai/gpt-4.1", "open_ai", `{"type":"response.completed","response":{"id":"resp_test","model":"gpt-4.1","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}`},

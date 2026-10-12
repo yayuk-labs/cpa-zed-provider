@@ -251,6 +251,12 @@ func prepare(req request, spec *zedModel) (completion, error) {
 			limits[key] = float64(spec.Output)
 		}
 	}
+	if provider == "open_ai" {
+		// Claude Code probes with one token; Responses requires at least 16.
+		if limit, ok := upstream["max_output_tokens"].(float64); ok && limit > 0 && limit < 16 {
+			upstream["max_output_tokens"] = float64(16)
+		}
+	}
 	if provider == "anthropic" {
 		if thinking, ok := upstream["thinking"].(map[string]any); ok && thinking["type"] == "enabled" {
 			limit, _ := upstream["max_tokens"].(float64)

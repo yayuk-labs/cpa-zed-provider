@@ -78,6 +78,10 @@ class Zed(BaseHTTPRequestHandler):
                 assert envelope["provider"] == "open_ai"
                 assert native["input"]
                 assert all(item.get("role") != "developer" for item in native["input"])
+                assert native.get("max_output_tokens", 16) >= 16
+                if native.get("max_output_tokens") == 16:
+                    self.respond(200, wrapped([{"type": "response.incomplete", "response": {"id": "resp_probe", "model": model, "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}, "output": [], "usage": {"input_tokens": 4, "output_tokens": 16, "total_tokens": 20}}}]))
+                    return
                 events = [{"type": "response.created", "response": {"id": "resp_smoke", "model": model, "status": "in_progress", "output": []}},
                           {"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "Hello"},
                           {"type": "response.completed", "response": {"id": "resp_smoke", "model": model, "status": "completed", "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello"}]}], "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6}}}]
@@ -198,6 +202,10 @@ plugins:
                     assert claude["content"][0]["text"] == "Hello", claude
                     responses = json.loads(call("/v1/responses", {"model": request["model"], "input": "Hello"}))
                     assert "Hello" in json.dumps(responses), responses
+                    for model in ("gpt-6-luna", "gpt-6.1-sol"):
+                        probe = {"model": "zed/open_ai/" + model, "max_tokens": 1, "system": [{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}], "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi", "cache_control": {"type": "ephemeral"}}]}]}
+                        result = json.loads(call("/v1/messages?beta=true", probe))
+                        assert result["type"] == "message" and result["stop_reason"] == "max_tokens", (model, result)
                     for model in MODELS[1:]:
                         model_id = "zed/" + provider(model) + "/" + model
                         messages = [{"role": "user", "content": "Hello"}]
