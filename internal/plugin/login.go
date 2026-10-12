@@ -161,7 +161,7 @@ func (a *App) pollLogin(req request) (pluginapi.AuthLoginPollResponse, error) {
 	if session.auth == nil {
 		return pluginapi.AuthLoginPollResponse{Status: "pending"}, nil
 	}
-	auth, err := a.preserveAccount(*session.auth)
+	auth, err := a.preserveAccount(a.enrichAuth(*session.auth, req.CallbackID))
 	if err != nil {
 		return pluginapi.AuthLoginPollResponse{}, err
 	}
@@ -170,6 +170,39 @@ func (a *App) pollLogin(req request) (pluginapi.AuthLoginPollResponse, error) {
 	session.close()
 	a.mu.Unlock()
 	return pluginapi.AuthLoginPollResponse{Status: "success", Auth: auth}, nil
+}
+
+func (a *App) enrichAuth(auth pluginapi.AuthData, callbackID string) pluginapi.AuthData {
+	c, err := credentialFrom(auth.StorageJSON, auth.Metadata)
+	if err != nil {
+		return auth
+	}
+	user, err := a.userInfo(c, callbackID)
+	if err != nil {
+		return auth
+	}
+	data := auth.Metadata
+	if email := strings.TrimSpace(user.Email); email != "" {
+		data["email"] = email
+	}
+	if name := strings.TrimSpace(user.Name); name != "" {
+		data["name"] = name
+	}
+	if text(data, "email") != "" || text(data, "name") != "" {
+		raw, err := json.Marshal(data)
+		if err == nil {
+			auth = authData(auth.FileName, raw, data)
+			auth.ID = sessionAuthID(auth.ID, auth.FileName)
+		}
+	}
+	return auth
+}
+
+func sessionAuthID(id, filename string) string {
+	if id != "" {
+		return id
+	}
+	return filename
 }
 
 func (a *App) preserveAccount(auth pluginapi.AuthData) (pluginapi.AuthData, error) {
@@ -202,6 +235,11 @@ func (a *App) preserveAccount(auth pluginapi.AuthData) (pluginapi.AuthData, erro
 		}
 		for _, key := range []string{"type", "user_id", "credential_json"} {
 			data[key] = auth.Metadata[key]
+		}
+		for _, key := range []string{"email", "name"} {
+			if value := text(auth.Metadata, key); value != "" {
+				data[key] = value
+			}
 		}
 		data["last_refreshed_at"] = time.Now().UTC().Format(time.RFC3339)
 		raw, err := json.Marshal(data)

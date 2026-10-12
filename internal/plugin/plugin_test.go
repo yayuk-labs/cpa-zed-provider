@@ -64,7 +64,10 @@ func TestBrowserLoginDecryptsCallbackAndRefreshesCredential(t *testing.T) {
 					}
 					return json.RawMessage(`{"files":[]}`), nil
 				case "host.auth.get":
-					return json.RawMessage(`{"name":"custom.json","json":{"type":"zed","user_id":"42","credential_json":"old-dummy","prefix":"work","disabled":true,"organization_id":"org-personal","note":"keep me"}}`), nil
+					return json.RawMessage(`{"name":"custom.json","json":{"type":"zed","user_id":"42","credential_json":"old-dummy","prefix":"work","disabled":true,"organization_id":"org-personal","email":"existing@example.com","note":"keep me"}}`), nil
+				}
+				if method == "host.http.do" {
+					return json.Marshal(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{"email":"zed@example.com","name":"Zed User"}`)})
 				}
 				return nil, fmt.Errorf("unexpected host callback %s", method)
 			})
@@ -146,7 +149,7 @@ func TestBrowserLoginDecryptsCallbackAndRefreshesCredential(t *testing.T) {
 			if existing {
 				expected = "custom.json"
 			}
-			if poll.Status != "success" || poll.Auth.FileName != expected || poll.Auth.Metadata["credential_json"] != "dummy-credential" {
+			if poll.Status != "success" || poll.Auth.FileName != expected || poll.Auth.Metadata["credential_json"] != "dummy-credential" || poll.Auth.Label != "zed@example.com" || poll.Auth.Metadata["email"] != "zed@example.com" {
 				t.Fatalf("incorrect completed auth: %+v", poll)
 			}
 			if existing && (poll.Auth.ID != "stable-auth" || poll.Auth.Prefix != "work" || !poll.Auth.Disabled || poll.Auth.Metadata["note"] != "keep me") {
@@ -157,7 +160,7 @@ func TestBrowserLoginDecryptsCallbackAndRefreshesCredential(t *testing.T) {
 			})
 			var refreshed pluginapi.AuthRefreshResponse
 			rpc(t, app, "auth.refresh", pluginapi.AuthRefreshRequest{AuthID: poll.Auth.ID, AuthProvider: "zed", StorageJSON: poll.Auth.StorageJSON, Metadata: poll.Auth.Metadata}, &refreshed)
-			if refreshed.Auth.ID != poll.Auth.ID || refreshed.Auth.Metadata["credential_json"] != "dummy-credential" || time.Until(refreshed.NextRefreshAfter) < 58*time.Minute {
+			if refreshed.Auth.ID != poll.Auth.ID || refreshed.Auth.Metadata["credential_json"] != "dummy-credential" || refreshed.Auth.Metadata["email"] != "zed@example.com" || refreshed.Auth.Label != "zed@example.com" || time.Until(refreshed.NextRefreshAfter) < 58*time.Minute {
 				t.Fatal("refresh lost credential or returned wrong schedule")
 			}
 		})
@@ -628,6 +631,55 @@ func TestCredentialImport(t *testing.T) {
 	}
 }
 
+func TestZedQuotaCapabilityFetchesAccountUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/client/users/me" || r.Header.Get("Authorization") != "42 dummy-credential" {
+			t.Errorf("unexpected quota request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		io.WriteString(w, `{"plan":"pro","plan_v3":"zed_pro","subscription_ended_at":"2030-01-01T00:00:00Z","model_requests_used":25,"model_requests_limit":{"limited":100},"edit_predictions_used":5,"edit_predictions_limit":50}`)
+	}))
+	defer server.Close()
+	app := testApp(t, server.URL)
+	var quota pluginapi.QuotaFetchResponse
+	rpc(t, app, "quota.fetch", map[string]any{"provider": "zed", "storage_json": []byte(`{"type":"zed","user_id":"42","credential_json":"dummy-credential"}`), "host_callback_id": "request-1"}, &quota)
+	if quota.Subscription == nil || quota.Subscription.Plan != "zed_pro" || len(quota.Groups) != 1 || len(quota.Groups[0].Buckets) != 2 {
+		t.Fatalf("incorrect quota response: %+v", quota)
+	}
+	if quota.Groups[0].Buckets[0].RemainingFraction != 0.75 || quota.Groups[0].Buckets[1].RemainingFraction != 0.9 || len(quota.Summary) != 4 {
+		t.Fatalf("incorrect quota values: %+v", quota)
+	}
+	var description pluginapi.QuotaDescribeResponse
+	rpc(t, app, "quota.describe", nil, &description)
+	if description.DisplayName != "Zed" || description.SupportsReset || len(description.SupportedProviders) != 1 || description.SupportedProviders[0] != "zed" {
+		t.Fatalf("incorrect quota description: %+v", description)
+	}
+}
+
+func TestZedQuotaDoesNotInventMissingLimits(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	app := testApp(t, server.URL)
+	var quota pluginapi.QuotaFetchResponse
+	rpc(t, app, "quota.fetch", map[string]any{"provider": "zed", "storage_json": []byte(`{"type":"zed","user_id":"42","credential_json":"dummy-credential"}`), "host_callback_id": "request-1"}, &quota)
+	if quota.Subscription != nil || len(quota.Groups) != 0 || len(quota.Summary) != 0 {
+		t.Fatalf("missing limits were reported as quota: %+v", quota)
+	}
+}
+
+func TestAuthImportUsesEmailLabel(t *testing.T) {
+	app := plugin.NewApp()
+	defer app.Shutdown()
+	var parsed pluginapi.AuthParseResponse
+	rpc(t, app, "auth.parse", pluginapi.AuthParseRequest{Provider: "zed", RawJSON: []byte(`{"type":"zed","user_id":"42","credential_json":"dummy","email":"zed@example.com"}`)}, &parsed)
+	if parsed.Auth.Label != "zed@example.com" || parsed.Auth.Metadata["email"] != "zed@example.com" {
+		t.Fatalf("email was not exposed in Auth: %+v", parsed.Auth)
+	}
+}
+
 func TestRegistrationProvidesRequiredCPAMetadata(t *testing.T) {
 	app := plugin.NewApp()
 	defer app.Shutdown()
@@ -638,5 +690,9 @@ func TestRegistrationProvidesRequiredCPAMetadata(t *testing.T) {
 	rpc(t, app, "plugin.register", map[string]any{}, &result)
 	if result.Metadata.Name != "Zed" || result.Metadata.Logo != "https://zed.dev/favicon_black_64.png" || result.Metadata.Version == "" || result.Metadata.Author == "" || result.Metadata.GitHubRepository == "" {
 		t.Fatal("CPA rejects plugins with missing required metadata")
+	}
+	var capabilities map[string]any
+	if err := json.Unmarshal(result.Capabilities, &capabilities); err != nil || capabilities["quota_provider"] != true {
+		t.Fatalf("quota provider capability was not registered: %s", result.Capabilities)
 	}
 }

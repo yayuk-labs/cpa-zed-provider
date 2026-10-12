@@ -13,7 +13,7 @@ import (
 )
 
 const ABIVersion = 1
-const Version = "0.1.2"
+const Version = "0.1.3"
 
 type HostCaller func(string, any) (json.RawMessage, error)
 
@@ -87,15 +87,97 @@ func (a *App) host(method string, req any, out any) error {
 }
 
 type request struct {
-	Provider, AuthID, FileName, Model, SourceFormat, State string
-	Method, Path                                           string
-	Body                                                   []byte
-	RawJSON, StorageJSON, Payload                          []byte
-	ConfigYAML                                             []byte `json:"config_yaml"`
-	Metadata, AuthMetadata                                 map[string]any
-	Stream                                                 bool
-	StreamID                                               string `json:"stream_id"`
-	CallbackID                                             string `json:"host_callback_id"`
+	Provider, AuthProvider, AuthID, FileName, Model, SourceFormat, State string
+	Method, Path                                                        string
+	Body                                                                []byte
+	RawJSON, StorageJSON, Payload                                       []byte
+	ConfigYAML                                                          []byte `json:"config_yaml"`
+	Metadata, AuthMetadata                                              map[string]any
+	Attributes                                                          map[string]string `json:"attributes"`
+	AuthIndex                                                           string            `json:"auth_index"`
+	Host                                                                map[string]any    `json:"host"`
+	Stream                                                              bool
+	StreamID                                                            string `json:"stream_id"`
+	CallbackID                                                          string `json:"host_callback_id"`
+}
+
+func (r *request) UnmarshalJSON(raw []byte) error {
+	type plain request
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	*r = request(decoded)
+	var fields struct {
+		Provider     string `json:"provider"`
+		AuthProvider string `json:"auth_provider"`
+		AuthID       string `json:"auth_id"`
+		FileName     string `json:"file_name"`
+		Model        string `json:"model"`
+		SourceFormat string `json:"source_format"`
+		State        string `json:"state"`
+		Method       string `json:"method"`
+		Path         string `json:"path"`
+		Body        []byte         `json:"body"`
+		RawJSON     []byte         `json:"raw_json"`
+		StorageJSON []byte         `json:"storage_json"`
+		Payload     []byte         `json:"payload"`
+		Metadata    map[string]any `json:"metadata"`
+		AuthMetadata map[string]any `json:"auth_metadata"`
+		Stream      bool           `json:"stream"`
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	if r.Provider == "" {
+		r.Provider = fields.Provider
+	}
+	if r.AuthProvider == "" {
+		r.AuthProvider = fields.AuthProvider
+	}
+	if r.AuthID == "" {
+		r.AuthID = fields.AuthID
+	}
+	if r.FileName == "" {
+		r.FileName = fields.FileName
+	}
+	if r.Model == "" {
+		r.Model = fields.Model
+	}
+	if r.SourceFormat == "" {
+		r.SourceFormat = fields.SourceFormat
+	}
+	if r.State == "" {
+		r.State = fields.State
+	}
+	if r.Method == "" {
+		r.Method = fields.Method
+	}
+	if r.Path == "" {
+		r.Path = fields.Path
+	}
+	if r.Body == nil {
+		r.Body = fields.Body
+	}
+	if r.RawJSON == nil {
+		r.RawJSON = fields.RawJSON
+	}
+	if r.StorageJSON == nil {
+		r.StorageJSON = fields.StorageJSON
+	}
+	if r.Payload == nil {
+		r.Payload = fields.Payload
+	}
+	if r.Metadata == nil {
+		r.Metadata = fields.Metadata
+	}
+	if r.AuthMetadata == nil {
+		r.AuthMetadata = fields.AuthMetadata
+	}
+	if !r.Stream {
+		r.Stream = fields.Stream
+	}
+	return nil
 }
 
 func (a *App) HandleMethod(method string, raw []byte) ([]byte, error) {
@@ -144,7 +226,7 @@ func (a *App) handle(method string, req request) (any, error) {
 		a.mu.Lock()
 		a.closed = false
 		a.mu.Unlock()
-		return map[string]any{"schema_version": 1, "metadata": pluginapi.Metadata{Name: "Zed", Logo: "https://zed.dev/favicon_black_64.png", Version: Version, Author: "naufal", GitHubRepository: "https://github.com/yayuk-labs/cpa-zed-provider", ConfigFields: []pluginapi.ConfigField{{Name: "zed_version", Type: "string", Description: "Zed client version sent to Cloud"}, {Name: "system_id", Type: "string", Description: "Zed installation system ID"}, {Name: "login_port", Type: "integer", Description: "Loopback browser callback port; 0 chooses an available port"}}}, "capabilities": map[string]any{"auth_provider": true, "management_api": true, "model_provider": true, "executor": true, "executor_model_scope": "oauth", "executor_input_formats": []string{"chat-completions"}, "executor_output_formats": []string{"chat-completions"}}}, nil
+		return map[string]any{"schema_version": 1, "metadata": pluginapi.Metadata{Name: "Zed", Logo: "https://zed.dev/favicon_black_64.png", Version: Version, Author: "naufal", GitHubRepository: "https://github.com/yayuk-labs/cpa-zed-provider", ConfigFields: []pluginapi.ConfigField{{Name: "zed_version", Type: "string", Description: "Zed client version sent to Cloud"}, {Name: "system_id", Type: "string", Description: "Zed installation system ID"}, {Name: "login_port", Type: "integer", Description: "Loopback browser callback port; 0 chooses an available port"}}}, "capabilities": map[string]any{"auth_provider": true, "management_api": true, "model_provider": true, "executor": true, "quota_provider": true, "executor_model_scope": "oauth", "executor_input_formats": []string{"chat-completions"}, "executor_output_formats": []string{"chat-completions"}}}, nil
 	case "management.register":
 		return pluginapi.ManagementRegistrationResponse{Resources: []pluginapi.ResourceRoute{{Path: "/login", Menu: "Zed", Description: "Sign into Zed from a remote CPA server"}}, Routes: []pluginapi.ManagementRoute{{Method: "POST", Path: "/plugins/zed/callback"}}}, nil
 	case "management.handle":
@@ -155,6 +237,14 @@ func (a *App) handle(method string, req request) (any, error) {
 		return a.startLogin(req)
 	case "auth.login.poll":
 		return a.pollLogin(req)
+	case "quota.identifier":
+		return map[string]string{"identifier": "zed"}, nil
+	case "quota.describe":
+		return pluginapi.QuotaDescribeResponse{SupportedProviders: []string{"zed"}, DisplayName: "Zed", SupportsReset: false}, nil
+	case "quota.fetch":
+		return a.fetchQuota(req)
+	case "quota.reset":
+		return pluginapi.QuotaResetResponse{Success: false, Message: "Zed quota reset is not supported"}, nil
 	case "auth.refresh":
 		return a.refresh(req)
 	case "auth.parse":
@@ -193,6 +283,10 @@ func text(data map[string]any, key string) string { s, _ := data[key].(string); 
 
 func authData(filename string, raw []byte, data map[string]any) pluginapi.AuthData {
 	id := text(data, "user_id")
+	label := text(data, "email")
+	if label == "" {
+		label = id
+	}
 	if filename == "" {
 		filename = "zed-login-" + strings.Map(func(r rune) rune {
 			if strings.ContainsRune("/\\:*?<>|\x00", r) || r < 32 {
@@ -202,7 +296,7 @@ func authData(filename string, raw []byte, data map[string]any) pluginapi.AuthDa
 		}, id) + ".json"
 	}
 	disabled, _ := data["disabled"].(bool)
-	return pluginapi.AuthData{Provider: "zed", ID: filename, FileName: filename, Label: id, Prefix: text(data, "prefix"), ProxyURL: text(data, "proxy_url"), Disabled: disabled, StorageJSON: raw, Metadata: data}
+	return pluginapi.AuthData{Provider: "zed", ID: filename, FileName: filename, Label: label, Prefix: text(data, "prefix"), ProxyURL: text(data, "proxy_url"), Disabled: disabled, StorageJSON: raw, Metadata: data}
 }
 
 type credential struct{ userID, secret, organization, systemID string }
