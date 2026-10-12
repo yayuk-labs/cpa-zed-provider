@@ -51,8 +51,9 @@ func rpc(t *testing.T, app *plugin.App, method string, req any, out any) {
 }
 
 func TestBrowserLoginDecryptsCallbackAndRefreshesCredential(t *testing.T) {
-	for _, existing := range []bool{false, true} {
-		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+	for _, tc := range []struct{ existing, remote bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+		t.Run(fmt.Sprintf("existing=%t/remote=%t", tc.existing, tc.remote), func(t *testing.T) {
+			existing := tc.existing
 			app := plugin.NewApp()
 			defer app.Shutdown()
 			app.SetHostCaller(func(method string, payload any) (json.RawMessage, error) {
@@ -76,9 +77,6 @@ func TestBrowserLoginDecryptsCallbackAndRefreshesCredential(t *testing.T) {
 			if link.Host != "zed.dev" || link.Path != "/native_app_signin" || login.State == "" || time.Until(login.ExpiresAt) > 10*time.Minute {
 				t.Fatalf("invalid login response: %+v", login)
 			}
-			if login.Metadata["loopback_callback_url"] != "http://127.0.0.1:"+link.Query().Get("native_app_port")+"/" {
-				t.Fatal("login did not register its loopback callback URL")
-			}
 			der, err := base64.RawURLEncoding.DecodeString(link.Query().Get("native_app_public_key"))
 			if err != nil {
 				t.Fatal(err)
@@ -97,22 +95,51 @@ func TestBrowserLoginDecryptsCallbackAndRefreshesCredential(t *testing.T) {
 				t.Fatal(err)
 			}
 			callback := "http://127.0.0.1:" + link.Query().Get("native_app_port") + "/?" + url.Values{"user_id": {"42"}, "access_token": {base64.URLEncoding.EncodeToString(cipher)}}.Encode()
-			client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-			response, err := client.Get(callback)
-			if err != nil {
-				t.Fatal(err)
+			submit := func(callbackURL, state string) int {
+				if tc.remote {
+					body, _ := json.Marshal(map[string]string{"state": state, "redirect_url": callbackURL})
+					var result pluginapi.ManagementResponse
+					rpc(t, app, "management.handle", pluginapi.ManagementRequest{Method: http.MethodPost, Path: "/v0/management/plugins/zed/callback", Body: body}, &result)
+					return result.StatusCode
+				}
+				client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+				response, err := client.Get(callbackURL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				response.Body.Close()
+				if response.StatusCode == 307 && response.Header.Get("Location") != "https://zed.dev/native_app_signin_succeeded" {
+					t.Fatal("wrong success redirect")
+				}
+				return response.StatusCode
 			}
-			response.Body.Close()
-			if response.StatusCode != 307 || response.Header.Get("Location") != "https://zed.dev/native_app_signin_succeeded" {
-				t.Fatal("callback did not complete")
+			if tc.remote {
+				for _, invalid := range []string{
+					strings.Replace(callback, "127.0.0.1", "example.com", 1),
+					strings.Replace(callback, "/?", "/other?", 1),
+					strings.Replace(callback, "http://", "https://", 1),
+					strings.Replace(callback, "http://", "http://other@", 1),
+					callback + "#fragment",
+					"http://127.0.0.1:1/?user_id=42&access_token=invalid",
+					"http://127.0.0.1:" + link.Query().Get("native_app_port") + "/?user_id=42&access_token=invalid",
+				} {
+					if status := submit(invalid, login.State); status != 400 {
+						t.Fatalf("invalid callback accepted: %d", status)
+					}
+				}
+				if status := submit(callback, "unknown-state"); status != 410 {
+					t.Fatalf("unknown session accepted: %d", status)
+				}
 			}
-			response, err = client.Get(callback)
-			if err != nil {
-				t.Fatal(err)
+			expectedStatus := 307
+			if tc.remote {
+				expectedStatus = 200
 			}
-			response.Body.Close()
-			if response.StatusCode != 409 {
-				t.Fatal("callback replay was accepted")
+			if status := submit(callback, login.State); status != expectedStatus {
+				t.Fatalf("callback status %d, want %d", status, expectedStatus)
+			}
+			if status := submit(callback, login.State); status != 409 {
+				t.Fatalf("callback replay accepted: %d", status)
 			}
 			rpc(t, app, "auth.login.poll", pluginapi.AuthLoginPollRequest{Provider: "zed", State: login.State}, &poll)
 			expected := "zed-login-42.json"

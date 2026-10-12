@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zed</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,sans-serif;background:#f5f5f3;color:#202321;font-size:16px}
+*{box-sizing:border-box}body{margin:0}main{max-width:38rem;margin:clamp(2rem,8vh,6rem) auto;padding:0 1.5rem 3rem}
+header{display:flex;gap:1rem;align-items:center;margin-bottom:2.5rem}header img{width:40px;height:40px}h1{font-size:2rem;margin:0;font-weight:650}
+h2{font-size:1.125rem;margin:2rem 0 .75rem}p{line-height:1.6;margin:.75rem 0;color:#515952}label{display:block;font-weight:600;margin:1rem 0 .5rem}
+input,textarea,button{font:inherit}input,textarea{width:100%;padding:.85rem;border:1px solid #8a938c;border-radius:6px;background:#fff;color:#202321;caret-color:#216b42}
+textarea{resize:vertical;min-height:8rem;overflow-wrap:anywhere}button,a.action{display:inline-block;padding:.8rem 1.15rem;background:#216b42;border:0;border-radius:6px;color:#fff;font-weight:600;cursor:pointer;text-decoration:none;margin-top:1rem}
+button:hover,a.action:hover{background:#195432}button:disabled{opacity:.55;cursor:wait}a{color:#216b42;text-underline-offset:.2em}a.action{margin-right:1rem}
+:focus-visible{outline:3px solid #34794e;outline-offset:3px}::selection{background:#bbdfc6;color:#152e1f}.hint{font-size:.875rem}#notice{padding-top:1rem;color:#202321}#notice[data-error=true]{color:#a02920}[hidden]{display:none!important}
+@media(prefers-color-scheme:dark){:root{background:#181c19;color:#edf1ed}p{color:#bbc5bd}input,textarea{background:#242b26;color:#edf1ed;border-color:#748278}a{color:#99d6ab}#notice{color:#edf1ed}#notice[data-error=true]{color:#ffb4a9}header img{filter:invert(1)}}
+</style>
+</head>
+<body>
+<main>
+<header><img src="https://zed.dev/favicon_black_64.png" alt=""><h1>Zed</h1></header>
+<p>Connect your Zed account to CPA. Use this page when CPA runs on another machine.</p>
+<form id="start">
+<h2>Start sign-in</h2>
+<label for="key">CPA management key</label>
+<input id="key" type="password" autocomplete="off" spellcheck="false" required aria-describedby="key-help">
+<p class="hint" id="key-help">Kept in this page only. Never saved to browser storage.</p>
+<button id="start-button">Start Zed sign-in</button>
+</form>
+<section id="callback-section" hidden>
+<h2>Complete sign-in</h2>
+<p>Open Zed, finish signing in, then copy the full redirected URL from your browser’s address bar. On a remote server, the localhost page may fail to load; you can still copy its URL.</p>
+<a class="action" id="signin" target="_blank" rel="noopener noreferrer">Open Zed sign-in</a>
+<form id="callback">
+<label for="redirect">Callback URL</label>
+<textarea id="redirect" spellcheck="false" autocomplete="off" required placeholder="http://127.0.0.1:…/?user_id=…&amp;access_token=…"></textarea>
+<button id="finish-button">Save Zed account</button>
+</form>
+</section>
+<p id="notice" role="status" aria-live="polite"></p>
+</main>
+<script>
+const key=document.querySelector('#key'),notice=document.querySelector('#notice'),section=document.querySelector('#callback-section'),signin=document.querySelector('#signin'),redirect=document.querySelector('#redirect');
+let state='';
+function message(text,error=false){notice.textContent=text;notice.dataset.error=String(error)}
+async function call(path,body,method=body?'POST':'GET'){
+  if(!key.value.trim())throw new Error('Enter your CPA management key.');
+  const response=await fetch(path,{method,headers:{Authorization:'Bearer '+key.value.trim(),'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined,cache:'no-store'});
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok){const error=new Error(response.status===401||response.status===403?'Management key rejected. Check the key and try again.':data.error||'Request failed. Try again.');error.status=response.status;throw error}
+  return data;
+}
+document.querySelector('#start').addEventListener('submit',async event=>{
+  event.preventDefault();const button=document.querySelector('#start-button');button.disabled=true;
+  try{
+    if(state)await call('/v8/management/oauth/session?state='+encodeURIComponent(state),undefined,'DELETE');
+    const login=await call('/v8/management/oauth/auth-url?provider=zed');
+    state=login.state;signin.href=login.url;redirect.value='';section.hidden=false;message('Sign-in started. Open Zed to continue.');signin.focus();
+  }catch(error){message(error.message,true)}finally{button.disabled=false}
+});
+document.querySelector('#callback').addEventListener('submit',async event=>{
+  event.preventDefault();const button=document.querySelector('#finish-button');button.disabled=true;
+  try{
+    try{await call('/v0/management/plugins/zed/callback',{state,redirect_url:redirect.value.trim()})}catch(error){if(error.status!==409)throw error}
+    const result=await call('/v8/management/oauth/status?state='+encodeURIComponent(state));
+    if(result.status!=='ok')throw new Error(result.error||'Account not saved yet. Try again.');
+    state='';key.value='';redirect.value='';section.hidden=true;message('Zed account saved. You can close this page.');
+  }catch(error){message(error.message,true)}finally{button.disabled=false}
+});
+</script>
+</body>
+</html>

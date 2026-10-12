@@ -13,7 +13,7 @@ import (
 )
 
 const ABIVersion = 1
-const Version = "0.1.1"
+const Version = "0.1.2"
 
 type HostCaller func(string, any) (json.RawMessage, error)
 
@@ -88,6 +88,8 @@ func (a *App) host(method string, req any, out any) error {
 
 type request struct {
 	Provider, AuthID, FileName, Model, SourceFormat, State string
+	Method, Path                                           string
+	Body                                                   []byte
 	RawJSON, StorageJSON, Payload                          []byte
 	ConfigYAML                                             []byte `json:"config_yaml"`
 	Metadata, AuthMetadata                                 map[string]any
@@ -142,7 +144,11 @@ func (a *App) handle(method string, req request) (any, error) {
 		a.mu.Lock()
 		a.closed = false
 		a.mu.Unlock()
-		return map[string]any{"schema_version": 1, "metadata": pluginapi.Metadata{Name: "Zed", Logo: "https://zed.dev/favicon_black_64.png", Version: Version, Author: "naufal", GitHubRepository: "https://github.com/yayuk-labs/cpa-zed-provider", ConfigFields: []pluginapi.ConfigField{{Name: "zed_version", Type: "string", Description: "Zed client version sent to Cloud"}, {Name: "system_id", Type: "string", Description: "Zed installation system ID"}, {Name: "login_port", Type: "integer", Description: "Loopback browser callback port; 0 chooses an available port"}}}, "capabilities": map[string]any{"auth_provider": true, "model_provider": true, "executor": true, "executor_model_scope": "oauth", "executor_input_formats": []string{"chat-completions"}, "executor_output_formats": []string{"chat-completions"}}}, nil
+		return map[string]any{"schema_version": 1, "metadata": pluginapi.Metadata{Name: "Zed", Logo: "https://zed.dev/favicon_black_64.png", Version: Version, Author: "naufal", GitHubRepository: "https://github.com/yayuk-labs/cpa-zed-provider", ConfigFields: []pluginapi.ConfigField{{Name: "zed_version", Type: "string", Description: "Zed client version sent to Cloud"}, {Name: "system_id", Type: "string", Description: "Zed installation system ID"}, {Name: "login_port", Type: "integer", Description: "Loopback browser callback port; 0 chooses an available port"}}}, "capabilities": map[string]any{"auth_provider": true, "management_api": true, "model_provider": true, "executor": true, "executor_model_scope": "oauth", "executor_input_formats": []string{"chat-completions"}, "executor_output_formats": []string{"chat-completions"}}}, nil
+	case "management.register":
+		return pluginapi.ManagementRegistrationResponse{Resources: []pluginapi.ResourceRoute{{Path: "/login", Menu: "Zed", Description: "Sign into Zed from a remote CPA server"}}, Routes: []pluginapi.ManagementRoute{{Method: "POST", Path: "/plugins/zed/callback"}}}, nil
+	case "management.handle":
+		return a.management(req)
 	case "auth.identifier", "executor.identifier":
 		return map[string]string{"identifier": "zed"}, nil
 	case "auth.login.start":

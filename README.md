@@ -6,7 +6,7 @@ Includes browser login, credential-file import, account-preserving sign-in, cach
 
 ## Build
 
-Requires Go 1.26+, CGO, and a native C compiler. The CPA SDK is resolved from its Go module. Local login works with the public CPA SDK. Pasting remote callbacks requires a CPA build with plugin loopback callback forwarding support.
+Requires Go 1.26+, CGO, and a native C compiler. The CPA SDK is resolved from its Go module. Uses CPA's public plugin SDK and existing plugin management/resource routes. CPA source changes are not required.
 
 From `cpa-zed-provider`, build for your native platform:
 
@@ -60,15 +60,21 @@ curl 'http://127.0.0.1:8317/v8/management/oauth/auth-url?provider=zed' \
   -H 'Authorization: Bearer MANAGEMENT_KEY'
 ```
 
-Open the returned `url` in a browser. Zed redirects to the plugin's loopback listener with an encrypted credential. On remote CPA, paste the full redirected URL into the management UI's callback field. This requires CPA's plugin loopback callback forwarding support; the host matches the URL to a pending login and the plugin validates the encrypted credential. Zed does not include OAuth `state` or `code` in its native callback. With older CPA builds, forward the configured `login_port` to the same local port before opening the login URL. RSA private keys stay in memory; sessions expire after ten minutes.
+Open the returned `url` in a browser on the CPA machine. Zed redirects to the plugin's loopback listener with an encrypted credential. RSA private keys stay in memory; sessions expire after ten minutes.
 
-To submit the URL through management directly:
+### Remote CPA (v0.1.2+)
+
+Open **Zed** in CPA's plugin menu, or visit `/v0/resource/plugins/cpa-zed-provider/login` on your CPA server. Enter the CPA management key and click **Start Zed sign-in**, then **Open Zed sign-in**. After signing in, copy the complete redirected localhost URL, paste it into this page's **Callback URL** field, and click **Save Zed account**. The localhost page may fail to load when CPA is remote; copy its URL anyway. The page keeps the management key in memory only and clears it after saving.
+
+This flow uses the plugin's authenticated callback endpoint and requires no CPA patch or SSH forwarding. CPA's generic OAuth callback field cannot accept Zed's native `user_id`/`access_token` callback.
+
+For API clients, submit the URL with the `state` returned when starting login:
 
 ```sh
-curl -X POST 'http://127.0.0.1:8317/v8/management/oauth/callback' \
+curl -X POST 'http://127.0.0.1:8317/v0/management/plugins/zed/callback' \
   -H 'Authorization: Bearer MANAGEMENT_KEY' \
   -H 'Content-Type: application/json' \
-  -d '{"provider":"zed","redirect_url":"FULL_ZED_CALLBACK_URL"}'
+  -d '{"state":"RETURNED_STATE","redirect_url":"FULL_ZED_CALLBACK_URL"}'
 ```
 
 Poll the returned `state` until CPA reports `ok`. This final poll persists the credential through CPA's auth store:
@@ -124,7 +130,7 @@ go vet ./...
 gofmt -l .
 ```
 
-The integration smoke check requires Python 3, OpenSSL, the compiled plugin, and a CPA executable. It starts isolated servers with dummy credentials, verifies plugin loading, model registration, completions, streaming, downstream protocol translation, encrypted login, and account preservation, then stops them:
+The integration smoke check requires Python 3, OpenSSL, the compiled plugin, and a CPA executable. It starts isolated servers with dummy credentials, verifies plugin loading, model registration, completions, streaming, downstream protocol translation, local encrypted login, plugin-only remote callbacks, authentication/replay rejection, and account preservation, then stops them:
 
 ```sh
 python3 scripts/smoke.py --cpa /path/to/cli-proxy-api --plugin dist/cpa-zed-provider.dylib

@@ -22,12 +22,13 @@ import (
 )
 
 type loginSession struct {
-	mu      sync.Mutex
-	key     *rsa.PrivateKey
-	server  *http.Server
-	timer   *time.Timer
-	expires time.Time
-	auth    *pluginapi.AuthData
+	mu          sync.Mutex
+	key         *rsa.PrivateKey
+	server      *http.Server
+	timer       *time.Timer
+	expires     time.Time
+	auth        *pluginapi.AuthData
+	callbackURL string
 }
 
 func (s *loginSession) close() {
@@ -47,7 +48,8 @@ func (a *App) startLogin(req request) (pluginapi.AuthLoginStartResponse, error) 
 		return pluginapi.AuthLoginStartResponse{}, fail(503, "Could not bind Zed login callback port")
 	}
 	state := uuid()
-	session := &loginSession{key: key, expires: time.Now().Add(10 * time.Minute)}
+	port := listener.Addr().(*net.TCPAddr).Port
+	session := &loginSession{key: key, expires: time.Now().Add(10 * time.Minute), callbackURL: "http://127.0.0.1:" + strconv.Itoa(port) + "/"}
 	session.server = &http.Server{Handler: http.HandlerFunc(session.callback), ReadHeaderTimeout: 10 * time.Second}
 	a.mu.Lock()
 	if a.closed {
@@ -67,9 +69,8 @@ func (a *App) startLogin(req request) (pluginapi.AuthLoginStartResponse, error) 
 	a.workers.Add(1)
 	a.mu.Unlock()
 	go func() { defer a.workers.Done(); session.server.Serve(listener) }()
-	port := listener.Addr().(*net.TCPAddr).Port
 	query := url.Values{"native_app_port": {strconv.Itoa(port)}, "native_app_public_key": {base64.RawURLEncoding.EncodeToString(x509.MarshalPKCS1PublicKey(&key.PublicKey))}}
-	return pluginapi.AuthLoginStartResponse{Provider: "zed", URL: "https://zed.dev/native_app_signin?" + query.Encode(), State: state, ExpiresAt: session.expires, Metadata: map[string]any{"loopback_callback_url": "http://127.0.0.1:" + strconv.Itoa(port) + "/"}}, nil
+	return pluginapi.AuthLoginStartResponse{Provider: "zed", URL: "https://zed.dev/native_app_signin?" + query.Encode(), State: state, ExpiresAt: session.expires}, nil
 }
 
 func (s *loginSession) callback(w http.ResponseWriter, r *http.Request) {
@@ -77,42 +78,72 @@ func (s *loginSession) callback(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if err := s.complete(r.URL.Query()); err != nil {
+		rpcErr := err.(*RPCError)
+		http.Error(w, rpcErr.Message, rpcErr.HTTPStatus)
+		return
+	}
+	http.Redirect(w, r, "https://zed.dev/native_app_signin_succeeded", http.StatusTemporaryRedirect)
+}
+
+func (s *loginSession) complete(query url.Values) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.auth != nil {
-		http.Error(w, "Callback already completed", 409)
-		return
+		return fail(409, "Callback already completed")
 	}
 	if time.Now().After(s.expires) {
-		http.Error(w, "Login session expired", 410)
-		return
+		return fail(410, "Login session expired")
 	}
-	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
-	ciphertext := strings.TrimSpace(r.URL.Query().Get("access_token"))
+	userID := strings.TrimSpace(query.Get("user_id"))
+	ciphertext := strings.TrimSpace(query.Get("access_token"))
 	if userID == "" || len(userID) > 256 || len(ciphertext) > 1024 {
-		http.Error(w, "Invalid user_id or access_token", 400)
-		return
+		return fail(400, "Invalid user_id or access_token")
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(ciphertext, "="))
 	if err != nil {
-		http.Error(w, "Invalid encrypted credential", 400)
-		return
+		return fail(400, "Invalid encrypted credential")
 	}
 	plaintext, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, s.key, decoded, nil)
 	if err != nil || !utf8.Valid(plaintext) {
-		http.Error(w, "Invalid encrypted credential", 400)
-		return
+		return fail(400, "Invalid encrypted credential")
 	}
 	data := map[string]any{"type": "zed", "user_id": userID, "credential_json": string(plaintext)}
 	raw, _ := json.Marshal(data)
 	if _, err = credentialFrom(raw, nil); err != nil {
-		http.Error(w, "Invalid Zed credential", 400)
-		return
+		return fail(400, "Invalid Zed credential")
 	}
 	auth := authData("", raw, data)
 	s.auth = &auth
 	s.key = nil
-	http.Redirect(w, r, "https://zed.dev/native_app_signin_succeeded", http.StatusTemporaryRedirect)
+	return nil
+}
+
+func (a *App) submitLoginCallback(body []byte) error {
+	var submitted struct {
+		State       string `json:"state"`
+		RedirectURL string `json:"redirect_url"`
+	}
+	if len(body) > 4096 || json.Unmarshal(body, &submitted) != nil {
+		return fail(400, "Invalid callback submission")
+	}
+	a.mu.Lock()
+	session := a.sessions[submitted.State]
+	a.mu.Unlock()
+	if session == nil {
+		return fail(410, "Unknown or expired Zed login session. Start sign-in again.")
+	}
+	u, err := url.Parse(strings.TrimSpace(submitted.RedirectURL))
+	if err != nil || u.User != nil || u.Fragment != "" {
+		return fail(400, "Invalid Zed callback URL")
+	}
+	query := u.Query()
+	u.RawQuery = ""
+	u.ForceQuery = false
+	if u.String() != session.callbackURL {
+		return fail(400, "Callback URL does not match this Zed login. Paste the URL from the current sign-in.")
+	}
+	return session.complete(query)
 }
 
 func (a *App) pollLogin(req request) (pluginapi.AuthLoginPollResponse, error) {
