@@ -2,7 +2,7 @@
 
 Zed Cloud AI provider for CLIProxyAPI, packaged as a standard C-ABI shared-library plugin using CPA's public translator SDK.
 
-Includes browser login, credential-file import, account-preserving sign-in, cached LLM tokens, token refresh, organization-scoped token compatibility, dynamic models, completions, and incremental streaming. Anthropic, OpenAI Responses, Google Gemini, and xAI requests use their native formats. CPA handles downstream Chat Completions, Claude Messages, and Responses compatibility and publishes usage to other plugins.
+Includes browser login with best-effort account email lookup, credential-file import, account-preserving sign-in, cached LLM tokens, token refresh, organization-scoped token compatibility, dynamic models, quota reporting in CLIProxyAPI Quota Management, completions, and incremental streaming. Anthropic, OpenAI Responses, Google Gemini, and xAI requests use their native formats. CPA handles downstream Chat Completions, Claude Messages, and Responses compatibility and publishes usage to other plugins.
 
 ## Build
 
@@ -99,6 +99,12 @@ Existing Zed auth files are accepted directly:
 ```
 
 `credential_json` is an opaque string, not an LLM bearer token. Optional `organization_id` selects a Zed organization; otherwise the plugin discovers the default/personal organization when the token endpoint requires it. Existing `prefix`, `disabled`, `proxy_url`, `system_id`, and other metadata remain in the auth file.
+
+## Auth identity and quota
+
+After browser sign-in, the plugin best-effort queries Zed's `/client/users/me` endpoint and saves the returned email in the auth data so CPA's **Auth** page can display it. If profile lookup fails or Zed provides no email, login still succeeds and the user ID remains the label. Imported auth files can include an `email` field to display it without a profile lookup.
+
+CPA's **Quota Management** uses the same account endpoint to report the plan, model-request usage, and edit-prediction usage when Zed returns finite limits and usage values. Unlimited or missing limits are not shown as exhausted quotas. Zed does not expose a reset operation here, so quota reset is unsupported. The plugin uses CPA's public quota-provider capability; no custom management route or CPA patch is needed.
 
 Place the file in CPA's configured auth directory, or upload through management:
 

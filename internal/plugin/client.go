@@ -14,6 +14,42 @@ import (
 
 func (a *App) settings() config { a.mu.Lock(); defer a.mu.Unlock(); return a.config }
 
+type zedUserInfo struct {
+	Email        string `json:"email"`
+	Name         string `json:"name"`
+	Plan         string `json:"plan"`
+	PlanV2       string `json:"plan_v2"`
+	PlanV3       string `json:"plan_v3"`
+	ModelUsed    *int64 `json:"model_requests_used"`
+	ModelLimit   any    `json:"model_requests_limit"`
+	EditUsed     *int64 `json:"edit_predictions_used"`
+	EditLimit    any    `json:"edit_predictions_limit"`
+}
+
+func (a *App) userInfo(c credential, callbackID string) (zedUserInfo, error) {
+	cfg := a.settings()
+	headers := http.Header{"Authorization": {c.userID + " " + c.secret}, "Content-Type": {"application/json"}}
+	systemID := c.systemID
+	if systemID == "" {
+		systemID = cfg.SystemID
+	}
+	if systemID != "" {
+		headers.Set("X-Zed-System-Id", systemID)
+	}
+	var resp pluginapi.HTTPResponse
+	if err := a.host("host.http.do", map[string]any{"method": "GET", "url": strings.TrimRight(cfg.BaseURL, "/") + "/client/users/me", "headers": headers, "host_callback_id": callbackID}, &resp); err != nil {
+		return zedUserInfo{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return zedUserInfo{}, upstreamError(resp.StatusCode, "user profile")
+	}
+	var user zedUserInfo
+	if err := json.Unmarshal(resp.Body, &user); err != nil {
+		return zedUserInfo{}, fail(502, "Invalid Zed user response")
+	}
+	return user, nil
+}
+
 func (a *App) llmToken(c credential, callbackID string, force bool) (string, error) {
 	hash := sha256.Sum256([]byte(c.userID + "\x00" + c.secret + "\x00" + c.organization + "\x00" + c.systemID))
 	key := hex.EncodeToString(hash[:])
