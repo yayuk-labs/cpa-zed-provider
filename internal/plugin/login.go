@@ -274,7 +274,7 @@ func (a *App) refresh(req request) (pluginapi.AuthRefreshResponse, error) {
 	if err != nil {
 		return pluginapi.AuthRefreshResponse{}, err
 	}
-	auth := authData(req.AuthID, raw, data)
+	auth := a.enrichAuth(authData(req.AuthID, raw, data), req.CallbackID)
 	// CPA retains the selected credential's filename independently of its runtime ID.
 	auth.FileName = ""
 	next := time.Now().Add(59 * time.Minute)

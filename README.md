@@ -102,9 +102,9 @@ Existing Zed auth files are accepted directly:
 
 ## Auth identity and quota
 
-After browser sign-in, the plugin best-effort queries Zed's `/client/users/me` endpoint and saves the returned email in the auth data so CPA's **Auth** page can display it. If profile lookup fails or Zed provides no email, login still succeeds and the user ID remains the label. Imported auth files can include an `email` field to display it without a profile lookup.
+After browser sign-in and during credential refresh, the plugin best-effort queries Zed's `/client/users/me` endpoint and saves the returned identity in the auth data so CPA's **Auth** page can display it. The label uses email when provided, then name or GitHub login, then user ID. Zed's current profile schema does not expose email; the plugin does not manufacture one from a GitHub login. If profile lookup fails, login and refresh still succeed. Imported auth files can include an `email` field to display it without a profile lookup.
 
-CPA's **Quota Management** uses the same account endpoint to report the plan, model-request usage, and edit-prediction usage when Zed returns finite limits and usage values. Unlimited or missing limits are not shown as exhausted quotas. Zed does not expose a reset operation here, so quota reset is unsupported. The plugin uses CPA's public quota-provider capability; no custom management route or CPA patch is needed.
+CPA's **Quota Management** reads the nested `plan.plan_v3` and `plan.usage.edit_predictions` fields from the same account endpoint. Older flat plan and usage responses remain supported. Model-request usage is reported only when supplied by Zed; the current schema exposes edit-prediction usage only. Unlimited or missing limits are not shown as exhausted quotas. Zed does not expose a reset operation here, so quota reset is unsupported. The plugin uses CPA's public quota-provider capability; no custom management route or CPA patch is needed.
 
 Place the file in CPA's configured auth directory, or upload through management:
 

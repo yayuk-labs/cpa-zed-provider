@@ -13,7 +13,7 @@ import (
 )
 
 const ABIVersion = 1
-const Version = "0.1.3"
+const Version = "0.1.4"
 
 type HostCaller func(string, any) (json.RawMessage, error)
 
@@ -284,6 +284,9 @@ func text(data map[string]any, key string) string { s, _ := data[key].(string); 
 func authData(filename string, raw []byte, data map[string]any) pluginapi.AuthData {
 	id := text(data, "user_id")
 	label := text(data, "email")
+	if label == "" {
+		label = text(data, "name")
+	}
 	if label == "" {
 		label = id
 	}

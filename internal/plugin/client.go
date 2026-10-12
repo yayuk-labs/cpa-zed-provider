@@ -28,7 +28,7 @@ type zedUserInfo struct {
 
 func (a *App) userInfo(c credential, callbackID string) (zedUserInfo, error) {
 	cfg := a.settings()
-	headers := http.Header{"Authorization": {c.userID + " " + c.secret}, "Content-Type": {"application/json"}}
+	headers := http.Header{"Authorization": {c.userID + " " + c.secret}, "Accept": {"application/json"}, "Content-Type": {"application/json"}}
 	systemID := c.systemID
 	if systemID == "" {
 		systemID = cfg.SystemID
@@ -43,9 +43,46 @@ func (a *App) userInfo(c credential, callbackID string) (zedUserInfo, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return zedUserInfo{}, upstreamError(resp.StatusCode, "user profile")
 	}
-	var user zedUserInfo
-	if err := json.Unmarshal(resp.Body, &user); err != nil {
+	var response struct {
+		zedUserInfo
+		Plan json.RawMessage `json:"plan"`
+		User *struct {
+			Email       string `json:"email"`
+			Name        string `json:"name"`
+			GitHubLogin string `json:"github_login"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(resp.Body, &response); err != nil {
 		return zedUserInfo{}, fail(502, "Invalid Zed user response")
+	}
+	user := response.zedUserInfo
+	if len(response.Plan) > 0 && string(response.Plan) != "null" {
+		if response.Plan[0] == '"' {
+			if json.Unmarshal(response.Plan, &user.Plan) != nil {
+				return zedUserInfo{}, fail(502, "Invalid Zed user response")
+			}
+		} else {
+			var plan struct {
+				PlanV3 string `json:"plan_v3"`
+				Usage  struct {
+					EditPredictions struct {
+						Used  *int64 `json:"used"`
+						Limit any    `json:"limit"`
+					} `json:"edit_predictions"`
+				} `json:"usage"`
+			}
+			if json.Unmarshal(response.Plan, &plan) != nil {
+				return zedUserInfo{}, fail(502, "Invalid Zed user response")
+			}
+			user.PlanV3 = plan.PlanV3
+			user.EditUsed, user.EditLimit = plan.Usage.EditPredictions.Used, plan.Usage.EditPredictions.Limit
+		}
+	}
+	if response.User != nil {
+		user.Email, user.Name = response.User.Email, response.User.Name
+		if strings.TrimSpace(user.Name) == "" {
+			user.Name = response.User.GitHubLogin
+		}
 	}
 	return user, nil
 }

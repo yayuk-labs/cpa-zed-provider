@@ -670,6 +670,32 @@ func TestZedQuotaDoesNotInventMissingLimits(t *testing.T) {
 	}
 }
 
+func TestZedQuotaReadsNestedPlanUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"user":{"github_login":"zed-user","name":null},"plan":{"plan_v3":"zed_pro","usage":{"edit_predictions":{"used":25,"limit":{"limited":100}}}}}`)
+	}))
+	defer server.Close()
+	app := testApp(t, server.URL)
+	var quota pluginapi.QuotaFetchResponse
+	rpc(t, app, "quota.fetch", map[string]any{"provider": "zed", "storage_json": []byte(`{"type":"zed","user_id":"42","credential_json":"dummy-credential"}`), "host_callback_id": "request-1"}, &quota)
+	if quota.Subscription == nil || quota.Subscription.Plan != "zed_pro" || len(quota.Groups) != 1 || len(quota.Groups[0].Buckets) != 1 || quota.Groups[0].Buckets[0].Window != "edit_predictions" || quota.Groups[0].Buckets[0].RemainingFraction != 0.75 || len(quota.Summary) != 2 {
+		t.Fatalf("incorrect nested quota: %+v", quota)
+	}
+}
+
+func TestZedQuotaNestedUnlimitedUsageHasNoBucket(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"user":{"github_login":"zed-user"},"plan":{"plan_v3":"zed_pro","usage":{"edit_predictions":{"used":25,"limit":"unlimited"}}}}`)
+	}))
+	defer server.Close()
+	app := testApp(t, server.URL)
+	var quota pluginapi.QuotaFetchResponse
+	rpc(t, app, "quota.fetch", map[string]any{"provider": "zed", "storage_json": []byte(`{"type":"zed","user_id":"42","credential_json":"dummy-credential"}`), "host_callback_id": "request-1"}, &quota)
+	if quota.Subscription == nil || quota.Subscription.Plan != "zed_pro" || len(quota.Groups) != 0 || len(quota.Summary) != 1 || quota.Summary[0].Key != "edit_predictions_used" || quota.Summary[0].Value != 25 {
+		t.Fatalf("unlimited nested usage was reported as a finite quota: %+v", quota)
+	}
+}
+
 func TestAuthImportUsesEmailLabel(t *testing.T) {
 	app := plugin.NewApp()
 	defer app.Shutdown()
@@ -677,6 +703,49 @@ func TestAuthImportUsesEmailLabel(t *testing.T) {
 	rpc(t, app, "auth.parse", pluginapi.AuthParseRequest{Provider: "zed", RawJSON: []byte(`{"type":"zed","user_id":"42","credential_json":"dummy","email":"zed@example.com"}`)}, &parsed)
 	if parsed.Auth.Label != "zed@example.com" || parsed.Auth.Metadata["email"] != "zed@example.com" {
 		t.Fatalf("email was not exposed in Auth: %+v", parsed.Auth)
+	}
+}
+
+func TestAuthRefreshEnrichesImportedIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, profile, label, email string
+		status                      int
+	}{
+		{"email", `{"user":{"email":"zed@example.com","name":"Zed User"},"plan":{"plan_v3":"zed_pro"}}`, "zed@example.com", "zed@example.com", 200},
+		{"github", `{"user":{"github_login":"zed-user","name":null},"plan":{"plan_v3":"zed_free"}}`, "zed-user", "", 200},
+		{"unavailable", `{"error":"unavailable"}`, "42", "", 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/client/llm_tokens":
+					io.WriteString(w, `{"token":"dummy-token"}`)
+				case "/client/users/me":
+					if r.Header.Get("Accept") != "application/json" {
+						t.Error("profile request must accept JSON")
+					}
+					w.WriteHeader(tc.status)
+					io.WriteString(w, tc.profile)
+				default:
+					t.Errorf("unexpected request: %s", r.URL.Path)
+					w.WriteHeader(404)
+				}
+			}))
+			defer server.Close()
+			app := testApp(t, server.URL)
+			var refreshed pluginapi.AuthRefreshResponse
+			rpc(t, app, "auth.refresh", map[string]any{"auth_id": "stable-auth", "storage_json": []byte(`{"type":"zed","user_id":"42","credential_json":"dummy-credential","disabled":true,"prefix":"work","note":"keep me"}`), "host_callback_id": "request-1"}, &refreshed)
+			if refreshed.Auth.ID != "stable-auth" || refreshed.Auth.FileName != "" || refreshed.Auth.Label != tc.label || !refreshed.Auth.Disabled || refreshed.Auth.Prefix != "work" || refreshed.Auth.Metadata["note"] != "keep me" || refreshed.Auth.Metadata["credential_json"] != "dummy-credential" {
+				t.Fatalf("refresh lost identity or settings: %+v", refreshed.Auth)
+			}
+			var stored map[string]any
+			if err := json.Unmarshal(refreshed.Auth.StorageJSON, &stored); err != nil {
+				t.Fatal(err)
+			}
+			if tc.email != "" && stored["email"] != tc.email || tc.email == "" && stored["email"] != nil {
+				t.Fatalf("incorrect stored email: %v", stored["email"])
+			}
+		})
 	}
 }
 
