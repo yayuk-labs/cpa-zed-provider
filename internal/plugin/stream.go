@@ -21,7 +21,7 @@ func (a *App) executeStream(req request) (any, error) {
 		return nil, fail(400, "CPA stream_id is required")
 	}
 	req.Stream = true
-	c, err := prepare(req)
+	c, err := a.prepare(req)
 	if err != nil {
 		return nil, err
 	}
@@ -36,20 +36,36 @@ func (a *App) executeStream(req request) (any, error) {
 			return nil, err
 		}
 		cfg := a.settings()
-		err = a.host("host.http.do_stream", map[string]any{"method": "POST", "url": strings.TrimRight(cfg.BaseURL, "/") + "/completions", "headers": http.Header{"Authorization": {"Bearer " + value}, "Content-Type": {"application/json"}, "X-Zed-Version": {cfg.ZedVersion}}, "body": c.body, "host_callback_id": req.CallbackID}, &resp)
+		err = a.host("host.http.do_stream", map[string]any{"method": "POST", "url": strings.TrimRight(cfg.BaseURL, "/") + "/completions", "headers": zedHeaders(value, cfg.ZedVersion), "body": c.body, "host_callback_id": req.CallbackID}, &resp)
 		if err != nil {
 			return nil, err
 		}
 		if resp.Status >= 200 && resp.Status < 300 {
 			break
 		}
+		var body []byte
 		if resp.ID != "" {
+			// Bound rejected response reads; never forward raw upstream bodies.
+			for reads := 0; reads < 16 && len(body) <= 64*1024; reads++ {
+				var chunk struct {
+					Payload []byte `json:"payload"`
+					Done    bool   `json:"done"`
+					Error   string `json:"error"`
+				}
+				if a.host("host.http.stream_read", map[string]string{"stream_id": resp.ID}, &chunk) != nil {
+					break
+				}
+				body = append(body, chunk.Payload...)
+				if chunk.Done || chunk.Error != "" {
+					break
+				}
+			}
 			a.host("host.http.stream_close", map[string]string{"stream_id": resp.ID}, nil)
 		}
 		if attempt == 0 && stale(resp.Status, resp.Headers) {
 			continue
 		}
-		return nil, upstreamError(resp.Status, "streaming completion")
+		return nil, completionError(resp.Status, "streaming completion", body, credential.secret, value)
 	}
 	if resp.ID == "" {
 		return nil, fail(502, "CPA did not return an upstream stream ID")
@@ -84,14 +100,16 @@ func (a *App) pumpStream(req request, c completion, upstreamID string) {
 	var state any
 	var buffer []byte
 	ended := false
+	terminal := false
 	emit := func(payload []byte) error {
 		return a.host("host.stream.emit", map[string]any{"stream_id": req.StreamID, "payload": payload}, nil)
 	}
 	process := func(raw []byte) error {
-		line, err := eventJSON(raw)
+		line, done, err := eventJSON(raw)
 		if err != nil {
 			return err
 		}
+		terminal = done
 		if len(line) == 0 {
 			return nil
 		}
@@ -159,6 +177,10 @@ func (a *App) pumpStream(req request, c completion, upstreamID string) {
 				streamErr = err
 				return
 			}
+			if terminal {
+				streamErr = emit([]byte("data: [DONE]\n\n"))
+				return
+			}
 			buffer = buffer[index+1:]
 		}
 		if len(buffer) > 16*1024*1024 {
@@ -174,7 +196,7 @@ func (a *App) pumpStream(req request, c completion, upstreamID string) {
 				streamErr = err
 				return
 			}
-			if !ended {
+			if !ended && !terminal {
 				streamErr = fail(502, "Zed stream ended before a completion event")
 				return
 			}

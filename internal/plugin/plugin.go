@@ -13,7 +13,7 @@ import (
 )
 
 const ABIVersion = 1
-const Version = "0.1.4"
+const Version = "0.1.5"
 
 type HostCaller func(string, any) (json.RawMessage, error)
 
@@ -50,6 +50,7 @@ type App struct {
 	config   config
 	call     HostCaller
 	tokens   map[string]*token
+	catalogs map[string]map[string]zedModel
 	workers  sync.WaitGroup
 	streams  map[string]string
 	sessions map[string]*loginSession
@@ -64,7 +65,7 @@ type token struct {
 }
 
 func NewApp() *App {
-	return &App{config: config{BaseURL: "https://cloud.zed.dev", ZedVersion: "0.222.4"}, tokens: make(map[string]*token), streams: make(map[string]string), sessions: make(map[string]*loginSession)}
+	return &App{config: config{BaseURL: "https://cloud.zed.dev", ZedVersion: "0.222.4"}, tokens: make(map[string]*token), catalogs: make(map[string]map[string]zedModel), streams: make(map[string]string), sessions: make(map[string]*loginSession)}
 }
 
 func (a *App) SetHostCaller(call HostCaller) { a.mu.Lock(); defer a.mu.Unlock(); a.call = call }

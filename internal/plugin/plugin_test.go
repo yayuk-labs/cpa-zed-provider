@@ -302,6 +302,142 @@ func TestAccountDiscoversModelsAndRefreshesStaleToken(t *testing.T) {
 	}
 }
 
+func TestZedStreamTerminatesOnStatus(t *testing.T) {
+	for _, status := range []string{`"stream_ended"`, `{"failed":{"message":"dummy-credential"}}`} {
+		t.Run(status, func(t *testing.T) {
+			app := plugin.NewApp()
+			defer app.Shutdown()
+			closed := make(chan string, 1)
+			var output strings.Builder
+			reads := 0
+			app.SetHostCaller(func(method string, payload any) (json.RawMessage, error) {
+				switch method {
+				case "host.http.do":
+					return json.Marshal(pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"token":"dummy-token"}`)})
+				case "host.http.do_stream":
+					return json.RawMessage(`{"status_code":200,"stream_id":"upstream"}`), nil
+				case "host.http.stream_read":
+					reads++
+					if reads > 1 {
+						t.Error("terminal Zed status must stop reading without waiting for EOF")
+						return nil, fmt.Errorf("unexpected read")
+					}
+					body := `{"status":{"queued":{"position":1}}}` + "\n" + `{"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}}` + "\n" + `{"status":` + status + "}\n"
+					return json.Marshal(map[string]any{"payload": []byte(body)})
+				case "host.stream.emit":
+					raw, _ := json.Marshal(payload)
+					var chunk struct{ Payload []byte }
+					json.Unmarshal(raw, &chunk)
+					output.Write(chunk.Payload)
+				case "host.stream.close":
+					raw, _ := json.Marshal(payload)
+					var end struct{ Error string }
+					json.Unmarshal(raw, &end)
+					closed <- end.Error
+				case "host.http.stream_close":
+				default:
+					return nil, fmt.Errorf("unexpected callback %s", method)
+				}
+				return json.RawMessage(`{}`), nil
+			})
+			req := completionRequest("zed/claude-sonnet-4-5")
+			req["stream_id"] = "downstream"
+			rpc(t, app, "executor.execute_stream", req, nil)
+			select {
+			case err := <-closed:
+				failed := strings.Contains(status, "failed")
+				if (err != "") != failed || strings.Contains(err, "dummy-credential") || !strings.Contains(output.String(), "Hello") || strings.Contains(output.String(), "[DONE]") == failed {
+					t.Fatalf("incorrect terminal handling: error=%q output=%s", err, output.String())
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("terminal status did not close stream")
+			}
+		})
+	}
+}
+
+func TestCatalogControlsFutureModelRequests(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/client/llm_tokens":
+			io.WriteString(w, `{"token":"dummy-token"}`)
+		case "/models":
+			io.WriteString(w, `{"models":[{"id":"future-reasoner","provider":"anthropic","max_token_count":100000,"max_output_tokens":4096,"supports_tools":true,"supports_images":true,"supports_thinking":true,"supports_disabling_thinking":false,"supported_effort_levels":[{"name":"Medium","value":"medium"}]}]}`)
+		case "/completions":
+			var body struct {
+				Provider string
+				Request  map[string]any `json:"provider_request"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			u := body.Request
+			thinking, _ := u["thinking"].(map[string]any)
+			config, _ := u["output_config"].(map[string]any)
+			if body.Provider != "anthropic" || u["max_tokens"] != float64(4096) || thinking["type"] != "adaptive" || thinking["budget_tokens"] != nil || config["effort"] != "medium" {
+				t.Errorf("catalogue capabilities ignored: %+v", body)
+			}
+			io.WriteString(w, claudeEvents)
+		}
+	}))
+	defer server.Close()
+	app := testApp(t, server.URL)
+	req := completionRequest("zed/future-reasoner")
+	var models pluginapi.ModelResponse
+	rpc(t, app, "model.for_auth", req, &models)
+	if len(models.Models) != 1 || models.Models[0].Thinking == nil || !strings.Contains(strings.Join(models.Models[0].Thinking.Levels, ","), "medium") || models.Models[0].Thinking.ZeroAllowed || !strings.Contains(strings.Join(models.Models[0].SupportedInputModalities, ","), "image") {
+		t.Fatalf("catalogue capabilities not published: %+v", models)
+	}
+	req["Payload"] = []byte(`{"messages":[{"role":"user","content":"Hello"}],"max_tokens":128000,"reasoning_effort":"medium"}`)
+	rpc(t, app, "executor.execute", req, nil)
+}
+
+func TestCatalogLimitsAllProvidersWithoutReasoning(t *testing.T) {
+	for provider, response := range map[string]string{
+		"anthropic": claudeEvents,
+		"open_ai":   `{"type":"response.completed","response":{"id":"resp","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}]}}`,
+		"google":    `{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}`,
+		"x_ai":      `{"id":"chat","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}]}`,
+	} {
+		t.Run(provider, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/client/llm_tokens":
+					io.WriteString(w, `{"token":"dummy-token"}`)
+				case "/models":
+					fmt.Fprintf(w, `{"models":[{"id":"future-model","provider":%q,"max_output_tokens":4096,"supports_thinking":false}]}`, provider)
+				case "/completions":
+					var envelope struct {
+						Provider string
+						Request  map[string]any `json:"provider_request"`
+					}
+					json.NewDecoder(r.Body).Decode(&envelope)
+					u := envelope.Request
+					limit := u["max_tokens"]
+					if provider == "open_ai" {
+						limit = u["max_output_tokens"]
+					}
+					if provider == "google" {
+						config := u["generationConfig"].(map[string]any)
+						limit = config["maxOutputTokens"]
+						if config["thinkingConfig"] != nil {
+							t.Errorf("unsupported Gemini reasoning: %+v", config)
+						}
+					}
+					if envelope.Provider != provider || limit != float64(4096) || u["thinking"] != nil || u["reasoning"] != nil || u["reasoning_effort"] != nil {
+						t.Errorf("catalogue limits/reasoning ignored: %+v", envelope)
+					}
+					io.WriteString(w, response)
+				}
+			}))
+			defer server.Close()
+			app := testApp(t, server.URL)
+			req := completionRequest("zed/future-model")
+			rpc(t, app, "model.for_auth", req, nil)
+			req["Payload"] = []byte(`{"messages":[{"role":"user","content":"Hello"}],"max_tokens":128000,"reasoning_effort":"medium"}`)
+			rpc(t, app, "executor.execute", req, nil)
+		})
+	}
+}
+
 func testApp(t *testing.T, baseURL string) *plugin.App {
 	t.Helper()
 	app := plugin.NewApp()
@@ -428,6 +564,82 @@ func completionRequest(model string) map[string]any {
 	return map[string]any{"AuthID": "zed-test.json", "AuthProvider": "zed", "Model": model, "Format": "openai", "SourceFormat": "openai", "StorageJSON": []byte(`{"type":"zed","user_id":"42","credential_json":"dummy-credential"}`), "Payload": []byte(`{"model":"` + model + `","messages":[{"role":"system","content":"Helpful"},{"role":"user","content":"Weather?"}],"max_tokens":123,"tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}`), "host_callback_id": "request-1"}
 }
 
+func TestZedRequestCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		model, effort, thinking string
+		limit                   float64
+	}{
+		{"claude-haiku-5-5", "medium", "adaptive", 128000},
+		{"claude-haiku-5-5", "none", "disabled", 128000},
+		{"claude-haiku-4-5", "medium", "enabled", 64000},
+		{"claude-haiku-4-5", "high", "enabled", 64000},
+		{"gpt-6-luna", "medium", "", 128000},
+		{"gpt-6.1-sol", "medium", "", 128000},
+	} {
+		t.Run(tc.model+"/"+tc.effort, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/client/llm_tokens" {
+					io.WriteString(w, `{"token":"dummy-token"}`)
+					return
+				}
+				var body struct {
+					Request map[string]any `json:"provider_request"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					return
+				}
+				u := body.Request
+				if u["stream"] != true {
+					t.Error("Zed hosted completions require a native stream even for non-streaming clients")
+				}
+				if tc.thinking != "" {
+					thinking, _ := u["thinking"].(map[string]any)
+					if thinking["type"] != tc.thinking || u["max_tokens"] != tc.limit {
+						t.Errorf("invalid thinking or output cap: %+v", u)
+					}
+					if tc.thinking == "adaptive" {
+						config, _ := u["output_config"].(map[string]any)
+						if thinking["budget_tokens"] != nil || config["effort"] != tc.effort {
+							t.Errorf("adaptive effort lost: %+v", u)
+						}
+					}
+					if tc.thinking == "enabled" {
+						budget, _ := thinking["budget_tokens"].(float64)
+						if budget < 1024 || budget >= tc.limit {
+							t.Errorf("thinking budget exceeds output room: %+v", thinking)
+						}
+					}
+					for _, value := range u["messages"].([]any) {
+						for _, value := range value.(map[string]any)["content"].([]any) {
+							block := value.(map[string]any)
+							if block["type"] == "tool_result" && block["is_error"] != false {
+								t.Errorf("Zed requires tool_result.is_error: %+v", block)
+							}
+						}
+					}
+					io.WriteString(w, claudeEvents)
+				} else {
+					if u["max_output_tokens"] != tc.limit {
+						t.Errorf("output cap lost: %+v", u)
+					}
+					for _, value := range u["input"].([]any) {
+						if value.(map[string]any)["role"] == "developer" {
+							t.Error("Zed does not accept developer role")
+						}
+					}
+					io.WriteString(w, `{"type":"response.completed","response":{"id":"resp_test","model":"`+tc.model+`","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}`)
+				}
+			}))
+			defer server.Close()
+			app := testApp(t, server.URL)
+			req := completionRequest("zed/" + tc.model)
+			req["Payload"] = []byte(`{"messages":[{"role":"system","content":"Helpful"},{"role":"user","content":"Weather?"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"weather","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"Sunny"}],"max_tokens":128000,"reasoning_effort":"` + tc.effort + `"}`)
+			rpc(t, app, "executor.execute", req, nil)
+		})
+	}
+}
+
 func TestOtherUpstreamProviders(t *testing.T) {
 	for _, tc := range []struct{ model, provider, response string }{
 		{"zed/open_ai/gpt-4.1", "open_ai", `{"type":"response.completed","response":{"id":"resp_test","model":"gpt-4.1","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}`},
@@ -454,12 +666,33 @@ func TestOtherUpstreamProviders(t *testing.T) {
 				if tc.provider == "google" && body.Request["contents"] == nil {
 					t.Error("Google received Chat Completions instead of native Gemini")
 				}
-				io.WriteString(w, tc.response)
+				if tc.provider == "google" {
+					for _, value := range body.Request["safetySettings"].([]any) {
+						setting := value.(map[string]any)
+						if setting["threshold"] == "OFF" || setting["category"] == "HARM_CATEGORY_CIVIC_INTEGRITY" {
+							t.Errorf("unsupported Zed safety setting: %+v", setting)
+						}
+					}
+					config := body.Request["toolConfig"].(map[string]any)["functionCallingConfig"].(map[string]any)
+					if config["mode"] != "auto" {
+						t.Errorf("unsupported Zed tool mode: %+v", config)
+					}
+				}
+				io.WriteString(w, `{"status":"started"}`+"\n")
+				for _, line := range strings.Split(tc.response, "\n") {
+					io.WriteString(w, `{"event":`+line+"}\n")
+				}
+				io.WriteString(w, `{"status":"stream_ended"}`+"\n")
 			}))
 			defer server.Close()
 			app := testApp(t, server.URL)
 			var resp pluginapi.ExecutorResponse
-			rpc(t, app, "executor.execute", completionRequest(tc.model), &resp)
+			req := completionRequest(tc.model)
+			var payload map[string]any
+			json.Unmarshal(req["Payload"].([]byte), &payload)
+			payload["tool_choice"] = "auto"
+			req["Payload"], _ = json.Marshal(payload)
+			rpc(t, app, "executor.execute", req, &resp)
 			var data struct {
 				Model   string
 				Choices []struct{ Message struct{ Content string } }
@@ -483,11 +716,17 @@ func TestErrorsPreserveStatusAndRejectBrokenResponses(t *testing.T) {
 		status, want       int
 	}{
 		{"quota", "executor.execute", "dummy-credential must not leak", 429, 429},
+		{"validation", "executor.execute", `{"message":"missing field is_error; dummy-credential"}`, 400, 400},
+		{"stream_validation", "executor.execute_stream", `{"error":{"message":"missing field is_error; dummy-credential"}}`, 400, 400},
 		{"permission", "executor.execute_stream", "denied", 403, 403},
 		{"unauthorized_without_stale_marker", "executor.execute", "denied", 401, 401},
+		{"expired_marker", "executor.execute", "denied", 403, 403},
 		{"malformed", "executor.execute", `{"type":`, 200, 502},
 		{"truncated", "executor.execute", `{"type":"message_start","message":{"id":"broken"}}`, 200, 502},
 		{"embedded_error", "executor.execute", `{"type":"error","error":{"message":"failed"}}`, 200, 502},
+		{"wrapped_error", "executor.execute", `{"event":{"type":"error","error":{"message":"dummy-credential"}}}`, 200, 502},
+		{"wrapped_null", "executor.execute", `{"event":null}`, 200, 502},
+		{"wrapped_failure", "executor.execute", `{"status":{"failed":{"message":"dummy-credential"}}}`, 200, 502},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			exchanges := 0
@@ -496,6 +735,9 @@ func TestErrorsPreserveStatusAndRejectBrokenResponses(t *testing.T) {
 					exchanges++
 					io.WriteString(w, `{"token":"dummy-token"}`)
 					return
+				}
+				if tc.name == "expired_marker" {
+					w.Header().Set("X-Zed-Expired-Token", "true")
 				}
 				w.WriteHeader(tc.status)
 				io.WriteString(w, tc.body)
@@ -508,7 +750,9 @@ func TestErrorsPreserveStatusAndRejectBrokenResponses(t *testing.T) {
 					case "host.http.do":
 						return json.RawMessage(`{"StatusCode":200,"Body":"eyJ0b2tlbiI6ImR1bW15In0="}`), nil
 					case "host.http.do_stream":
-						return json.RawMessage(`{"status_code":403,"stream_id":"failed-stream"}`), nil
+						return json.Marshal(map[string]any{"status_code": tc.status, "stream_id": "failed-stream"})
+					case "host.http.stream_read":
+						return json.Marshal(map[string]any{"payload": []byte(tc.body), "done": true})
 					case "host.http.stream_close":
 						return json.RawMessage(`{}`), nil
 					}
@@ -527,8 +771,11 @@ func TestErrorsPreserveStatusAndRejectBrokenResponses(t *testing.T) {
 			if envelope.OK || envelope.Error == nil || envelope.Error.HTTPStatus != tc.want || strings.Contains(string(response), "dummy-credential") {
 				t.Fatalf("wrong error: %s", response)
 			}
-			if tc.status == 401 && exchanges != 1 {
-				t.Fatal("retried unauthorized response without stale marker")
+			if strings.Contains(tc.name, "validation") && !strings.Contains(string(response), "missing field is_error") {
+				t.Fatalf("upstream validation detail lost: %s", response)
+			}
+			if (tc.status == 401 || tc.name == "expired_marker") && exchanges != 2 {
+				t.Fatal("token rejection must refresh exactly once")
 			}
 		})
 	}

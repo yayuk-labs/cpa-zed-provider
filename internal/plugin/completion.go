@@ -29,7 +29,23 @@ func uuid() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
-func prepare(req request) (completion, error) {
+func (a *App) prepare(req request) (completion, error) {
+	model := strings.TrimPrefix(req.Model, "zed/")
+	if model == "" {
+		var payload struct{ Model string }
+		json.Unmarshal(req.Payload, &payload)
+		model = strings.TrimPrefix(payload.Model, "zed/")
+	}
+	a.mu.Lock()
+	spec, found := a.catalogs[catalogKey(req)][model]
+	a.mu.Unlock()
+	if found {
+		return prepare(req, &spec)
+	}
+	return prepare(req, nil)
+}
+
+func prepare(req request, spec *zedModel) (completion, error) {
 	var source map[string]json.RawMessage
 	if err := json.Unmarshal(req.Payload, &source); err != nil || source == nil {
 		return completion{}, fail(400, "Completion payload must be a JSON object")
@@ -52,6 +68,9 @@ func prepare(req request) (completion, error) {
 	provider := ""
 	if before, after, ok := strings.Cut(model, "/"); ok {
 		provider, model = before, after
+	}
+	if spec != nil && spec.Provider != "" {
+		provider = spec.Provider
 	}
 	if provider == "" {
 		switch {
@@ -82,17 +101,112 @@ func prepare(req request) (completion, error) {
 	upstream["model"] = model
 	if provider == "google" {
 		upstream["model"] = "models/" + model
+		settings, _ := upstream["safetySettings"].([]any)
+		filtered := settings[:0]
+		for _, value := range settings {
+			setting, _ := value.(map[string]any)
+			if setting["category"] == "HARM_CATEGORY_CIVIC_INTEGRITY" {
+				continue
+			}
+			if setting["threshold"] == "OFF" {
+				setting["threshold"] = "BLOCK_NONE"
+			}
+			filtered = append(filtered, value)
+		}
+		if settings != nil {
+			upstream["safetySettings"] = filtered
+		}
+		config, _ := upstream["toolConfig"].(map[string]any)
+		calling, _ := config["functionCallingConfig"].(map[string]any)
+		if mode, ok := calling["mode"].(string); ok {
+			switch mode {
+			case "VALIDATED", "AUTO":
+				calling["mode"] = "auto"
+			case "ANY", "NONE":
+				calling["mode"] = strings.ToLower(mode)
+			}
+		}
 	} else {
-		upstream["stream"] = req.Stream
+		// Zed serves native events; execute collects them for non-streaming clients.
+		upstream["stream"] = req.Stream || provider == "anthropic" || provider == "open_ai"
 	}
 	if provider == "anthropic" {
 		if _, ok := source["max_tokens"]; !ok {
 			if _, ok = source["max_completion_tokens"]; !ok {
-				upstream["max_tokens"] = 8192
+				upstream["max_tokens"] = float64(8192)
+			}
+		}
+		// Named catalogue efforts select adaptive thinking; older SDK registries can lag.
+		adaptive := model == "claude-haiku-5-5" || model == "claude-sonnet-5-5"
+		if spec != nil && len(spec.Efforts) > 0 {
+			if support := spec.thinkingSupport(); support != nil {
+				adaptive = len(support.Levels) > 0
+			}
+		}
+		if adaptive {
+			var effort string
+			json.Unmarshal(source["reasoning_effort"], &effort)
+			effort = strings.ToLower(strings.TrimSpace(effort))
+			switch effort {
+			case "none":
+				if spec != nil && spec.DisableThinking != nil && !*spec.DisableThinking {
+					return completion{}, fail(400, "The selected Zed model cannot disable thinking")
+				}
+				upstream["thinking"] = map[string]any{"type": "disabled"}
+				delete(upstream, "output_config")
+			case "", "auto":
+				upstream["thinking"] = map[string]any{"type": "adaptive"}
+				delete(upstream, "output_config")
+			case "minimal", "low", "medium", "high", "xhigh", "max":
+				if effort == "minimal" {
+					effort = "low"
+				}
+				if spec != nil && len(spec.Efforts) > 0 {
+					supported := false
+					for _, level := range spec.Efforts {
+						supported = supported || level.Value == effort
+					}
+					if !supported {
+						return completion{}, fail(400, "Unsupported reasoning effort for the selected Zed model")
+					}
+				}
+				upstream["thinking"] = map[string]any{"type": "adaptive"}
+				upstream["output_config"] = map[string]any{"effort": effort}
+			default:
+				return completion{}, fail(400, "Unsupported reasoning effort for the selected Zed model")
+			}
+		}
+		if (spec == nil || spec.Output <= 0) && (model == "claude-haiku-4-5" || strings.HasPrefix(model, "claude-haiku-4-5-")) {
+			if limit, _ := upstream["max_tokens"].(float64); limit > 64000 {
+				upstream["max_tokens"] = float64(64000)
+			}
+		}
+		if spec != nil && spec.Thinking != nil && !*spec.Thinking {
+			delete(upstream, "thinking")
+			delete(upstream, "output_config")
+		}
+		messages, _ := upstream["messages"].([]any)
+		for _, value := range messages {
+			message, _ := value.(map[string]any)
+			blocks, _ := message["content"].([]any)
+			for _, value := range blocks {
+				block, _ := value.(map[string]any)
+				if block["type"] == "tool_result" {
+					if _, ok := block["is_error"]; !ok {
+						block["is_error"] = false
+					}
+				}
 			}
 		}
 	}
 	if provider == "open_ai" {
+		items, _ := upstream["input"].([]any)
+		for _, value := range items {
+			item, _ := value.(map[string]any)
+			if item["role"] == "developer" {
+				item["role"] = "system"
+			}
+		}
 		for _, key := range []string{"temperature", "top_p", "max_output_tokens"} {
 			if value, ok := source[key]; ok {
 				var v any
@@ -112,6 +226,42 @@ func prepare(req request) (completion, error) {
 			delete(upstream, "reasoning")
 		}
 	}
+	if spec != nil && spec.Thinking != nil && !*spec.Thinking {
+		switch provider {
+		case "open_ai":
+			delete(upstream, "reasoning")
+		case "google":
+			if config, ok := upstream["generationConfig"].(map[string]any); ok {
+				delete(config, "thinkingConfig")
+			}
+		case "x_ai":
+			delete(upstream, "reasoning_effort")
+		}
+	}
+	if spec != nil && spec.Output > 0 {
+		limits, key := upstream, "max_tokens"
+		switch provider {
+		case "open_ai":
+			key = "max_output_tokens"
+		case "google":
+			limits, _ = upstream["generationConfig"].(map[string]any)
+			key = "maxOutputTokens"
+		}
+		if value, _ := limits[key].(float64); value > float64(spec.Output) {
+			limits[key] = float64(spec.Output)
+		}
+	}
+	if provider == "anthropic" {
+		if thinking, ok := upstream["thinking"].(map[string]any); ok && thinking["type"] == "enabled" {
+			limit, _ := upstream["max_tokens"].(float64)
+			if budget, _ := thinking["budget_tokens"].(float64); budget >= limit {
+				if limit <= 1024 {
+					return completion{}, fail(400, "Thinking requires max_tokens greater than 1024")
+				}
+				thinking["budget_tokens"] = limit - 1
+			}
+		}
+	}
 	nativeRequest, err := json.Marshal(upstream)
 	if err != nil {
 		return completion{}, err
@@ -120,32 +270,59 @@ func prepare(req request) (completion, error) {
 	return completion{provider, model, native, nativeRequest, body}, err
 }
 
-func eventJSON(line []byte) ([]byte, error) {
+func eventJSON(line []byte) ([]byte, bool, error) {
 	line = bytes.TrimSpace(line)
 	if bytes.HasPrefix(line, []byte("data:")) {
 		line = bytes.TrimSpace(line[5:])
 	}
-	if len(line) == 0 || bytes.HasPrefix(line, []byte("event:")) || bytes.HasPrefix(line, []byte(":")) || bytes.Equal(line, []byte("[DONE]")) {
-		return nil, nil
+	if bytes.Equal(line, []byte("[DONE]")) {
+		return nil, true, nil
+	}
+	if len(line) == 0 || bytes.HasPrefix(line, []byte("event:")) || bytes.HasPrefix(line, []byte(":")) {
+		return nil, false, nil
 	}
 	if !json.Valid(line) {
-		return nil, fail(502, "Zed returned malformed completion data")
+		return nil, false, fail(502, "Zed returned malformed completion data")
 	}
 	var data map[string]json.RawMessage
 	if json.Unmarshal(line, &data) != nil || data == nil {
-		return nil, fail(502, "Zed returned a non-object completion event")
+		return nil, false, fail(502, "Zed returned a non-object completion event")
+	}
+	if status, ok := data["status"]; ok {
+		var name string
+		var details map[string]json.RawMessage
+		json.Unmarshal(status, &name)
+		json.Unmarshal(status, &details)
+		if details["failed"] != nil {
+			name = "failed"
+		} else if details["stream_ended"] != nil {
+			name = "stream_ended"
+		} else if details["type"] != nil {
+			json.Unmarshal(details["type"], &name)
+		}
+		if name == "failed" {
+			return nil, false, fail(502, "Zed upstream stream failed")
+		}
+		return nil, name == "stream_ended", nil
+	}
+	if event, ok := data["event"]; ok {
+		line = event
+		data = nil
+		if json.Unmarshal(line, &data) != nil || data == nil {
+			return nil, false, fail(502, "Zed returned a non-object completion event")
+		}
 	}
 	var kind string
 	json.Unmarshal(data["type"], &kind)
 	if kind == "error" || kind == "response.failed" || data["error"] != nil && string(data["error"]) != "null" {
-		return nil, fail(502, "Zed returned an upstream completion error")
+		return nil, false, fail(502, "Zed returned an upstream completion error")
 	}
-	return line, nil
+	return line, false, nil
 }
 
 func (a *App) execute(req request) (pluginapi.ExecutorResponse, error) {
 	req.Stream = false
-	c, err := prepare(req)
+	c, err := a.prepare(req)
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
@@ -160,12 +337,15 @@ func (a *App) execute(req request) (pluginapi.ExecutorResponse, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(resp.Body))
 	scanner.Buffer(make([]byte, 4096), 16*1024*1024)
 	for scanner.Scan() {
-		line, err := eventJSON(scanner.Bytes())
+		line, terminal, err := eventJSON(scanner.Bytes())
 		if err != nil {
 			return pluginapi.ExecutorResponse{}, err
 		}
 		if len(line) > 0 {
 			lines = append(lines, line)
+		}
+		if terminal {
+			break
 		}
 	}
 	if err = scanner.Err(); err != nil {
